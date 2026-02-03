@@ -414,7 +414,9 @@ class InvestmentAssistant:
 
         # 判断是否需要研究
         needs_research = assessment.get("judgment", {}).get("needs_deep_research", False)
-        conclusion = assessment.get("conclusion", {})
+        conclusion = assessment.get("conclusion") or {}
+        if not isinstance(conclusion, dict):
+            conclusion = {"reason": str(conclusion)}
 
         self.display.separator()
 
