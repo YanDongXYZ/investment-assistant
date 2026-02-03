@@ -3,16 +3,21 @@
 目标：尽量保持与原 GeminiClient 一致的接口（chat/chat_with_system/search），
 以便项目在不大改业务逻辑的情况下切换到 GPT-5.2。
 
-注意：原项目的 Gemini search grounding / 结构化新闻搜索依赖 Google Search 工具。
-这里默认提供降级实现（返回提示/空结果），保证系统可跑通；如需联网搜索，
-后续可接入独立搜索服务。
+说明：原项目的 Gemini search grounding / 结构化新闻搜索依赖 Google Search 工具。
+本版本不依赖任何 API Key 的“基础联网搜索”方案：使用 Google News RSS 抓取新闻条目，
+再用模型把条目整理成 structured news。
 """
 
 from __future__ import annotations
 
 import os
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
+
+import re
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
 
 try:
     from openai import OpenAI
@@ -91,6 +96,97 @@ class OpenAIClient:
     def model_pro(self) -> str:
         return self.model
 
+    def _fetch_google_news_rss(self, query: str, limit: int = 8) -> Tuple[List[Dict[str, str]], Optional[str]]:
+        """Fetch Google News RSS items.
+
+        Returns (items, error). Each item: {title, link, pubDate, source}.
+        """
+        try:
+            q = urllib.parse.quote(query)
+            # CN zh RSS is generally better for Chinese names; still includes global sources.
+            url = f"https://news.google.com/rss/search?q={q}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+            with urllib.request.urlopen(url, timeout=20) as resp:
+                xml_bytes = resp.read()
+            root = ET.fromstring(xml_bytes)
+            channel = root.find('channel')
+            if channel is None:
+                return [], None
+            items = []
+            for it in channel.findall('item'):
+                title = (it.findtext('title') or '').strip()
+                link = (it.findtext('link') or '').strip()
+                pub = (it.findtext('pubDate') or '').strip()
+                source = (it.findtext('source') or '').strip()
+                if not title:
+                    continue
+                items.append({"title": title, "link": link, "pubDate": pub, "source": source})
+                if len(items) >= limit:
+                    break
+            return items, None
+        except Exception as e:
+            return [], str(e)
+
+    def _rss_items_to_structured_news(
+        self,
+        stock_name: str,
+        dimension: str,
+        focus: str,
+        rss_items: List[Dict[str, str]],
+    ) -> List[Dict]:
+        if not rss_items:
+            return []
+
+        # Keep prompt small; provide the raw items and ask for strict JSON.
+        compact = []
+        for x in rss_items[:8]:
+            compact.append({
+                "title": x.get("title", ""),
+                "source": x.get("source", ""),
+                "date": x.get("pubDate", ""),
+                "link": x.get("link", ""),
+            })
+
+        prompt = f"""你在做投资环境跟踪。目标公司/标的：{stock_name}
+
+维度：{dimension}
+关注点：{focus}
+
+下面是 Google News RSS 抓取到的原始条目（可能有噪音/重复/标题党），请你筛出最多 5 条最重要的，并严格输出 JSON（只输出 JSON，不要解释）：
+
+{{
+  \"news\": [
+    {{
+      \"date\": \"YYYY-MM-DD\",  # 如果无法解析日期，可留空字符串
+      \"title\": \"...\",
+      \"summary\": \"1-2 句摘要\",
+      \"dimension\": \"{dimension}\",
+      \"relevance\": \"与投资逻辑的关联说明\",
+      \"importance\": \"高/中/低\",
+      \"source\": \"...\",
+      \"url\": \"...\"
+    }}
+  ]
+}}
+
+原始条目：
+{compact}
+"""
+
+        text = self.chat(prompt)
+        # extract json
+        m = re.search(r'\{[\s\S]*\}', text)
+        if not m:
+            return []
+        try:
+            import json
+            obj = json.loads(m.group(0))
+            out = obj.get('news', [])
+            for n in out:
+                n['dimension'] = dimension
+            return out[:5]
+        except Exception:
+            return []
+
     def search_news_structured(
         self,
         stock_name: str,
@@ -98,25 +194,60 @@ class OpenAIClient:
         time_range_days: int = 7,
         playbook: Optional[Dict] = None,
     ) -> List[Dict]:
-        """降级版结构化新闻搜索：返回空新闻 + 元数据警告，避免流程报错。
+        """结构化新闻搜索（无需额外 API key）：Google News RSS + GPT 结构化。
 
-        原 GeminiClient.search_news_structured 依赖 Google Search grounding。
-        当前 OpenAIClient 未接入联网搜索，因此只能返回空结果。
+        约束：RSS 不保证覆盖面/时效；但能让 CLI 的“有新消息”流程可用。
         """
         end_date = datetime.now()
         start_date = end_date - timedelta(days=time_range_days)
+
+        # dimensions (keep close to gemini_client)
+        dims = [
+            ("公司核心动态", f"{stock_name} 财报 业绩 公告 管理层 重大事项", "财报发布、重大公告、人事变动、股东变化"),
+            ("行业与竞争", f"{stock_name} 竞争对手 行业格局 市场份额 " + " ".join(related_entities[:3]), "竞争对手动态、行业趋势、市场格局变化"),
+            ("产品与技术", f"{stock_name} 新产品 技术突破 研发 创新 专利", "新产品发布、技术进展、研发投入"),
+            ("宏观与政策", f"{stock_name} 政策 监管 行业政策 法规", "监管政策变化、行业扶持政策、法规调整"),
+        ]
+
+        all_news: List[Dict] = []
+        failed = []
+        for dim, q, focus in dims:
+            items, err = self._fetch_google_news_rss(q, limit=8)
+            if err:
+                failed.append({"dimension": dim, "error": err})
+                continue
+            structured = self._rss_items_to_structured_news(stock_name, dim, focus, items)
+            all_news.extend(structured)
+
+        # naive de-dup by title prefix
+        seen = set()
+        uniq = []
+        for n in all_news:
+            t = (n.get('title') or '').lower().strip()[:60]
+            if not t or t in seen:
+                continue
+            seen.add(t)
+            uniq.append(n)
+
+        # sort by importance then date (best-effort)
+        imp = {"高": 0, "中": 1, "低": 2}
+        uniq.sort(key=lambda x: (imp.get(x.get('importance', '低'), 2), x.get('date', '')), reverse=False)
+
         metadata = {
             "_is_metadata": True,
-            "total_dimensions": 0,
-            "successful_dimensions": 0,
-            "failed_dimensions": [],
+            "total_dimensions": len(dims),
+            "successful_dimensions": len(dims) - len(failed),
+            "failed_dimensions": failed,
             "search_warnings": [
-                "OpenAIClient 未接入联网搜索，已返回空新闻列表。可在 CLI 选择上传资料以辅助判断。",
+                "新闻来源=Google News RSS（无需 API key）；覆盖可能不完整，建议关键时刻上传资料复核。",
                 f"range={start_date.strftime('%Y-%m-%d')}..{end_date.strftime('%Y-%m-%d')}",
                 f"stock={stock_name}",
             ],
         }
-        return [metadata]
+
+        result = uniq[:20]
+        result.insert(0, metadata)
+        return result
 
     @property
     def model_flash(self) -> str:
