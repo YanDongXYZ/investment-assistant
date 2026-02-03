@@ -91,6 +91,33 @@ class OpenAIClient:
     def model_pro(self) -> str:
         return self.model
 
+    def search_news_structured(
+        self,
+        stock_name: str,
+        related_entities: List[str],
+        time_range_days: int = 7,
+        playbook: Optional[Dict] = None,
+    ) -> List[Dict]:
+        """降级版结构化新闻搜索：返回空新闻 + 元数据警告，避免流程报错。
+
+        原 GeminiClient.search_news_structured 依赖 Google Search grounding。
+        当前 OpenAIClient 未接入联网搜索，因此只能返回空结果。
+        """
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=time_range_days)
+        metadata = {
+            "_is_metadata": True,
+            "total_dimensions": 0,
+            "successful_dimensions": 0,
+            "failed_dimensions": [],
+            "search_warnings": [
+                "OpenAIClient 未接入联网搜索，已返回空新闻列表。可在 CLI 选择上传资料以辅助判断。",
+                f"range={start_date.strftime('%Y-%m-%d')}..{end_date.strftime('%Y-%m-%d')}",
+                f"stock={stock_name}",
+            ],
+        }
+        return [metadata]
+
     @property
     def model_flash(self) -> str:
         return self.model
