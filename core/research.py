@@ -395,19 +395,19 @@ class ResearchEngine:
 
         目标：更适配本环境、产出可核验证据。
         - 不走浏览器（避免验证码）
-        - 不依赖 OpenClaw 内置 web_search tool（该 tool 在当前环境对 Brave 有异常）
-        - 优先 Tavily，其次 Brave Search HTTP
+        - 通过 OpenClaw Gateway `web_search` tool 使用 Brave（不直连 Brave HTTP API）
+        - 优先 Tavily，其次 OpenClaw web_search（union 合并去重）
         - 输出包含 URL + snippet，便于报告引用
         - 结果带缓存/预算，降低 SIGKILL 风险
         """
 
         # Lazy import to keep startup fast
-        from .retrieval import SearchManager, TavilyProvider, BraveProvider, format_search_results_for_prompt
+        from .retrieval import SearchManager, TavilyProvider, OpenClawWebSearchProvider, format_search_results_for_prompt
 
         sm = SearchManager(
             providers=[
                 TavilyProvider() if os.getenv("TAVILY_API_KEY") else None,
-                BraveProvider(os.getenv("BRAVE_API_KEY")) if os.getenv("BRAVE_API_KEY") else None,
+                OpenClawWebSearchProvider(),
             ],
             cache_ttl_seconds=12 * 3600,
             hard_timeout_seconds=25,

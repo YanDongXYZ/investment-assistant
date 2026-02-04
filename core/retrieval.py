@@ -2,10 +2,12 @@
 
 Goals:
 - Provide robust web/news retrieval in environments where browser-based search is unreliable.
-- Support multiple providers (Tavily, Brave Search) with caching and strict time budgets.
+- Support multiple providers with caching and strict time budgets.
 - Produce citation-ready outputs (URL + snippet + timestamp/provider).
 
-This module is intentionally lightweight and does not depend on OpenClaw tool routing.
+Policy note (Peter requirement):
+- **Do NOT** call Brave Search HTTP API directly from this repo.
+- Use OpenClaw Gateway tool routing (`web_search`) which is backed by Brave and governed by OpenClaw policy.
 """
 
 from __future__ import annotations
@@ -83,45 +85,134 @@ class TavilyProvider(SearchProvider):
         return out
 
 
-class BraveProvider(SearchProvider):
-    name = "brave"
+class OpenClawWebSearchProvider(SearchProvider):
+    """Web search provider that invokes OpenClaw Gateway tool `web_search`.
 
-    def __init__(self, api_key: Optional[str] = None):
-        self.api_key = (api_key or os.getenv("BRAVE_API_KEY") or "").strip()
+    This is the sanctioned way to use Brave Search in this codebase.
+
+    Gateway config is loaded from `~/.openclaw/openclaw.json` (Peter chose mode A),
+    with optional environment-variable overrides:
+      - OPENCLAW_GATEWAY_URL (e.g. ws://127.0.0.1:18789)
+      - OPENCLAW_GATEWAY_TOKEN
+
+    Implementation uses the Gateway HTTP endpoint:
+      POST http://<host>:<port>/tools/invoke
+    """
+
+    name = "openclaw_web_search"
+
+    def __init__(self, *, config_path: Optional[str] = None, session_key: str = "main"):
+        self.session_key = session_key
+        self._gateway_http_base, self._token = self._load_gateway_config(config_path=config_path)
 
     def is_available(self) -> bool:
-        return bool(self.api_key)
+        return bool(self._gateway_http_base and self._token)
 
-    def search(self, query: str, *, max_results: int = 5, topic: str = "news", depth: str = "basic") -> List[SearchResult]:
-        # Note: Brave endpoint doesn't have topic/depth knobs like Tavily; we keep signature consistent.
+    @staticmethod
+    def _load_gateway_config(*, config_path: Optional[str] = None) -> tuple[str, str]:
+        # Env overrides (useful for CI / multi-env), but default is file-based per requirement.
+        env_url = (os.getenv("OPENCLAW_GATEWAY_URL") or "").strip()
+        env_token = (os.getenv("OPENCLAW_GATEWAY_TOKEN") or "").strip()
+        if env_url and env_token:
+            return OpenClawWebSearchProvider._ws_to_http(env_url), env_token
+
+        path = Path(config_path or os.path.expanduser("~/.openclaw/openclaw.json"))
+        if not path.exists():
+            return "", ""
+
+        try:
+            data = json.loads(path.read_text("utf-8"))
+        except Exception:
+            return "", ""
+
+        gw = (data.get("gateway") or {})
+        port = int(gw.get("port") or 18789)
+        bind = (gw.get("bind") or "loopback").lower()
+
+        # For local mode, loopback is correct; if bind is 0.0.0.0 we still default to localhost.
+        host = "127.0.0.1" if bind in ("loopback", "127.0.0.1", "localhost") else "127.0.0.1"
+
+        token = (((gw.get("auth") or {}).get("token")) or "").strip()
+        base = f"http://{host}:{port}"
+        return base, token
+
+    @staticmethod
+    def _ws_to_http(ws_url: str) -> str:
+        u = ws_url.strip()
+        if u.startswith("wss://"):
+            return "https://" + u[len("wss://"):]
+        if u.startswith("ws://"):
+            return "http://" + u[len("ws://"):]
+        if u.startswith("http://") or u.startswith("https://"):
+            return u
+        # best effort
+        return "http://" + u
+
+    def _invoke_tool(self, tool: str, args: Dict[str, Any]) -> Dict[str, Any]:
         import requests
 
-        url = "https://api.search.brave.com/res/v1/web/search"
-        params = {
-            "q": query,
-            "count": str(max(1, min(int(max_results), 10))),
-        }
+        url = f"{self._gateway_http_base}/tools/invoke"
         headers = {
-            "Accept": "application/json",
-            "X-Subscription-Token": self.api_key,
+            "Authorization": f"Bearer {self._token}",
+            "Content-Type": "application/json",
         }
-        r = requests.get(url, params=params, headers=headers, timeout=20)
+        payload = {
+            "tool": tool,
+            "args": args,
+            "sessionKey": self.session_key,
+        }
+        r = requests.post(url, headers=headers, json=payload, timeout=25)
         r.raise_for_status()
-        data = r.json()
-        web = (data.get("web") or {}).get("results") or []
+        obj = r.json()
+        if not obj.get("ok", False):
+            err = obj.get("error") or {}
+            raise RuntimeError(f"OpenClaw tool invoke failed: {err.get('type')}: {err.get('message')}")
+        result = obj.get("result") or {}
+        # Some tools (including web_search) return a chat-friendly wrapper:
+        # { content: [{type:'text', text:'{...json...}'}], details: {...} }
+        if isinstance(result, dict) and isinstance(result.get("details"), dict):
+            return result["details"]
+        # Best-effort parse from content[0].text
+        try:
+            content = result.get("content") if isinstance(result, dict) else None
+            if isinstance(content, list) and content and isinstance(content[0], dict):
+                text = content[0].get("text")
+                if isinstance(text, str) and text.strip().startswith("{"):
+                    return json.loads(text)
+        except Exception:
+            pass
+        return result
+
+    def search(self, query: str, *, max_results: int = 5, topic: str = "news", depth: str = "basic") -> List[SearchResult]:
+        # topic/depth kept for API compatibility; OpenClaw web_search doesn't expose them.
+        res = self._invoke_tool(
+            "web_search",
+            {
+                "query": query,
+                "count": max(1, min(int(max_results), 10)),
+                "country": "ALL",
+            },
+        )
+        items = res.get("results") or []
         out: List[SearchResult] = []
-        for entry in web:
+        for entry in items:
+            title = (entry.get("title") or "").strip()
+            url = (entry.get("url") or "").strip()
+            snippet = (entry.get("description") or entry.get("snippet") or "").strip()
+            published = (entry.get("published") or entry.get("age") or None)
+            if not title or not url:
+                continue
             out.append(
                 SearchResult(
-                    title=(entry.get("title") or "").strip(),
-                    url=(entry.get("url") or "").strip(),
-                    snippet=(entry.get("description") or "").strip(),
-                    provider=self.name,
-                    published=entry.get("age"),
+                    title=title,
+                    url=url,
+                    snippet=snippet,
+                    provider="openclaw:web_search",
+                    published=published,
                     score=None,
                 )
             )
-        return [x for x in out if x.title and x.url]
+        return out
 
 
 class SearchManager:
@@ -134,7 +225,7 @@ class SearchManager:
     ):
         self.providers: List[SearchProvider] = list(providers) if providers is not None else [
             TavilyProvider() if os.getenv("TAVILY_API_KEY") else None,
-            BraveProvider() if os.getenv("BRAVE_API_KEY") else None,
+            OpenClawWebSearchProvider(),
         ]
         self.providers = [p for p in self.providers if p is not None]
         self.cache_ttl_seconds = cache_ttl_seconds

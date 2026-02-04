@@ -227,20 +227,20 @@ class OpenAIClient:
         failed = []
         warnings: List[str] = []
 
-        # Use union search (Tavily + Brave) for better recall.
-        from .retrieval import SearchManager, TavilyProvider, BraveProvider
+        # Use union search (Tavily + OpenClaw web_search) for better recall.
+        from .retrieval import SearchManager, TavilyProvider, OpenClawWebSearchProvider
 
         sm = SearchManager(
             providers=[
                 TavilyProvider() if os.getenv("TAVILY_API_KEY") else None,
-                BraveProvider(os.getenv("BRAVE_API_KEY")) if os.getenv("BRAVE_API_KEY") else None,
+                OpenClawWebSearchProvider(),
             ],
             cache_ttl_seconds=6 * 3600,
             hard_timeout_seconds=20,
         )
 
         if not sm.providers:
-            warnings.append("未配置 TAVILY_API_KEY / BRAVE_API_KEY，降级到 Google News RSS。")
+            warnings.append("未配置检索 Provider，降级到 Google News RSS。")
             for dim, q, focus in dims:
                 items, err = self._fetch_google_news_rss(q, time_range_days=time_range_days, limit=8)
                 if err:
