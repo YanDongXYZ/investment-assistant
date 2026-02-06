@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """投资研究助手 - 主程序"""
 
+import json
 import os
 import sys
 import re
@@ -223,9 +224,14 @@ class InvestmentAssistant:
             lines.append(line)
         return "\n".join(lines).strip()
 
+    _MAX_JSON_INPUT_SIZE = 100_000  # 100 KB limit for JSON paste
+
     def _extract_json(self, text: str) -> Optional[Dict]:
         """Best-effort JSON extraction from raw text or markdown fenced block."""
         if not text:
+            return None
+        if len(text) > self._MAX_JSON_INPUT_SIZE:
+            self.display.print_error(f"输入过大（{len(text)} 字符），上限 {self._MAX_JSON_INPUT_SIZE} 字符。")
             return None
 
         # fenced code blocks first
@@ -257,10 +263,18 @@ class InvestmentAssistant:
             return None
         return None
 
+    # Fields that should not be overwritten by user JSON patches
+    _PROTECTED_FIELDS = {"created_at", "updated_at", "stock_id", "interview_transcript"}
+
     def _deep_merge(self, base: Dict, patch: Dict) -> Dict:
-        """Deep-merge dicts. Dict values merge recursively; lists/scalars replace."""
+        """Deep-merge dicts. Dict values merge recursively; lists/scalars replace.
+
+        Protected fields (timestamps, internal IDs) are silently dropped from the patch.
+        """
         out = dict(base or {})
         for k, v in (patch or {}).items():
+            if k in self._PROTECTED_FIELDS:
+                continue
             if isinstance(v, dict) and isinstance(out.get(k), dict):
                 out[k] = self._deep_merge(out[k], v)
             else:
@@ -538,7 +552,11 @@ class InvestmentAssistant:
         auto_collected = []
         with self.display.spinner(f"正在搜索过去 {time_range_days} 天的相关新闻...") as progress:
             progress.add_task("", total=None)
-            auto_collected = self.environment.collect_news(stock_id, stock_name, time_range_days)
+            news_result = self.environment.collect_news(stock_id, stock_name, time_range_days)
+            if isinstance(news_result, dict):
+                auto_collected = news_result.get("news", [])
+            else:
+                auto_collected = news_result if isinstance(news_result, list) else []
 
         # 显示 Environment 摘要
         self.display.environment_panel(auto_collected, user_uploaded)
@@ -685,7 +703,7 @@ class InvestmentAssistant:
         """执行深度研究"""
         self.display.print("\n正在执行深度研究...\n")
 
-        with self.display.spinner(f"使用 GPT-5.2 进行搜索和分析...") as progress:
+        with self.display.spinner(f"使用 {self.client.model} 进行搜索和分析...") as progress:
             progress.add_task("", total=None)
             result = self.research.execute_research(stock_id, research_plan, environment_data)
 
