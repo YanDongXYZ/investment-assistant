@@ -8,7 +8,7 @@ from datetime import datetime
 
 from .openai_client import OpenAIClient
 from .storage import Storage
-from .retrieval import SearchManager, format_search_results_for_prompt
+from .retrieval import SearchManager, TavilyProvider, OpenClawWebSearchProvider, format_search_results_for_prompt
 
 
 DEEP_RESEARCH_PROMPT = """## 角色定位
@@ -400,9 +400,6 @@ class ResearchEngine:
         - 输出包含 URL + snippet，便于报告引用
         - 结果带缓存/预算，降低 SIGKILL 风险
         """
-
-        # Lazy import to keep startup fast
-        from .retrieval import SearchManager, TavilyProvider, OpenClawWebSearchProvider, format_search_results_for_prompt
 
         sm = SearchManager(
             providers=[
