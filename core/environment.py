@@ -214,11 +214,10 @@ class EnvironmentCollector:
                 "search_warnings": []
             }
 
-        # 兼容 CLI：返回 List[Dict]，并把 metadata 作为第一个元素
-        result = list(news_list)
-        if search_metadata:
-            result.insert(0, search_metadata)
-        return result
+        return {
+            "news": news_list,
+            "search_metadata": search_metadata,
+        }
 
     def _parse_news_response(self, response: str) -> List[Dict]:
         """解析新闻响应"""

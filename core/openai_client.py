@@ -11,20 +11,22 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
-from datetime import datetime, timedelta
-from email.utils import parsedate_to_datetime
-from typing import Optional, List, Dict, Any, Tuple
-
 import re
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta
+from email.utils import parsedate_to_datetime
+from typing import Optional, List, Dict, Any, Tuple
 
 try:
     from openai import OpenAI
 except ImportError as e:
     raise ImportError("请先安装 openai: pip install openai") from e
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAIClient:
