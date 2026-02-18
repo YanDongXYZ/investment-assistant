@@ -11,18 +11,19 @@ import pytest
 def _make_assistant():
     """Create an InvestmentAssistant with fully mocked dependencies."""
     with patch("assistant.Storage") as MockStorage, \
-         patch("assistant.OpenAIClient") as MockClient, \
+         patch("assistant.create_llm_client") as MockClient, \
          patch("assistant.InterviewManager"), \
          patch("assistant.EnvironmentCollector"), \
          patch("assistant.ResearchEngine"), \
          patch("assistant.Display") as MockDisplay:
 
         mock_storage = MagicMock()
-        mock_storage.get_api_key.return_value = "sk-test"
+        mock_storage.get_openai_api_key.return_value = None
+        mock_storage.get_gemini_api_key.return_value = "gk-test"
         MockStorage.return_value = mock_storage
 
         mock_client = MagicMock()
-        mock_client.model = "gpt-5.2"
+        mock_client.model = "gemini-3-pro-preview"
         MockClient.return_value = mock_client
 
         MockDisplay.return_value = MagicMock()

@@ -340,6 +340,7 @@ function preferencesPage() {
             this.summaryEditResearchFocus = (this.summary.research_focus || []).join(', ');
             this.summaryEditDislikedPatterns = (this.summary.disliked_patterns || []).join(', ');
             this.summaryEditCustomRules = (this.summary.custom_rules || []).join('\n');
+
         },
 
         getCategoryLabel(category) {
@@ -367,6 +368,7 @@ function preferencesPage() {
             if (!dateStr) return '';
             return dateStr.substring(0, 10);
         },
+
 
         async learnFromInteractions() {
             this.learning = true;

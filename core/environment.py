@@ -383,7 +383,7 @@ class EnvironmentCollector:
             historical_uploads=historical_str
         )
 
-        response = self.client.chat(prompt)
+        response = self.client.chat_pro(prompt)
 
         # 解析 JSON 响应
         result, parse_error = self._extract_json(response)

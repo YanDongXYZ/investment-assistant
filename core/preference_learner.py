@@ -154,7 +154,7 @@ class PreferenceLearner:
 
         # 调用 AI 提取偏好
         prompt = PREFERENCE_EXTRACTION_PROMPT.format(interaction_data=interaction_text)
-        response = self.client.chat(prompt)
+        response = self.client.chat_pro(prompt)
 
         # 解析结果
         result = self._extract_json(response)

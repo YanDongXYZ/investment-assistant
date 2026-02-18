@@ -228,7 +228,7 @@ class InterviewManager:
             conversation_history=self._format_history()
         )
 
-        response = self.client.chat(prompt)
+        response = self.client.chat_flash(prompt)
 
         # 检查是否是总结
         playbook = self._extract_json(response)
@@ -280,7 +280,7 @@ class InterviewManager:
             conversation_history=self._format_history()
         )
 
-        response = self.client.chat(prompt)
+        response = self.client.chat_flash(prompt)
 
         # 检查是否是总结
         playbook = self._extract_json(response)

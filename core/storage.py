@@ -37,19 +37,90 @@ class Storage:
         with open(self.config_path, "w", encoding="utf-8") as f:
             json.dump(config, f, ensure_ascii=False, indent=2)
 
-    def get_api_key(self) -> Optional[str]:
-        """获取 API Key（OpenAI 优先，兼容旧版 Gemini 配置）"""
+    def get_openai_api_key(self) -> Optional[str]:
+        """获取 OpenAI API Key"""
         config = self.get_config()
-        return (config.get("openai_api_key")
-                or os.getenv("OPENAI_API_KEY")
-                or config.get("gemini_api_key")
-                or os.getenv("GEMINI_API_KEY"))
+        return config.get("openai_api_key") or os.getenv("OPENAI_API_KEY")
 
-    def set_api_key(self, api_key: str):
-        """设置 API Key（写入 openai_api_key，清理旧版 key）"""
+    def get_gemini_api_key(self) -> Optional[str]:
+        """获取 Gemini API Key"""
+        config = self.get_config()
+        return config.get("gemini_api_key") or os.getenv("GEMINI_API_KEY")
+
+    def get_api_key(self) -> Optional[str]:
+        """获取 API Key（优先 OpenAI，兼容 Gemini）"""
+        return self.get_openai_api_key() or self.get_gemini_api_key()
+
+    def set_openai_api_key(self, api_key: str):
+        """设置 OpenAI API Key"""
         config = self.get_config()
         config["openai_api_key"] = api_key
-        config.pop("gemini_api_key", None)
+        self.save_config(config)
+
+    def set_gemini_api_key(self, api_key: str):
+        """设置 Gemini API Key"""
+        config = self.get_config()
+        config["gemini_api_key"] = api_key
+        self.save_config(config)
+
+    def set_api_key(self, api_key: str):
+        """兼容旧接口：写入 openai_api_key"""
+        self.set_openai_api_key(api_key)
+
+    def get_llm_provider(self) -> Optional[str]:
+        """获取 LLM 提供商配置"""
+        config = self.get_config()
+        return config.get("llm_provider")
+
+    def set_llm_provider(self, provider: Optional[str]):
+        """设置 LLM 提供商配置"""
+        config = self.get_config()
+        if provider:
+            config["llm_provider"] = provider
+        else:
+            config.pop("llm_provider", None)
+        self.save_config(config)
+
+    def get_llm_model(self) -> Optional[str]:
+        """获取 LLM 模型配置（兼容旧字段）"""
+        config = self.get_config()
+        return config.get("llm_model")
+
+    def set_llm_model(self, model: Optional[str]):
+        """设置 LLM 模型配置（兼容旧字段）"""
+        config = self.get_config()
+        if model:
+            config["llm_model"] = model
+        else:
+            config.pop("llm_model", None)
+        self.save_config(config)
+
+    def get_llm_model_pro(self) -> Optional[str]:
+        """获取 LLM Pro 模型配置"""
+        config = self.get_config()
+        return config.get("llm_model_pro")
+
+    def set_llm_model_pro(self, model: Optional[str]):
+        """设置 LLM Pro 模型配置"""
+        config = self.get_config()
+        if model:
+            config["llm_model_pro"] = model
+        else:
+            config.pop("llm_model_pro", None)
+        self.save_config(config)
+
+    def get_llm_model_flash(self) -> Optional[str]:
+        """获取 LLM Flash 模型配置"""
+        config = self.get_config()
+        return config.get("llm_model_flash")
+
+    def set_llm_model_flash(self, model: Optional[str]):
+        """设置 LLM Flash 模型配置"""
+        config = self.get_config()
+        if model:
+            config["llm_model_flash"] = model
+        else:
+            config.pop("llm_model_flash", None)
         self.save_config(config)
 
     # ==================== 总体 Playbook ====================

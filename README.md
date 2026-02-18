@@ -385,7 +385,7 @@ ARM 新芯片架构的发布强化了我们的核心论点...
 
 ```bash
 # 启用认证
-curl -X POST http://localhost:5000/api/auth/setup \
+curl -X POST http://localhost:5001/api/auth/setup \
   -H "Content-Type: application/json" \
   -d '{"password": "your_password", "enable": true}'
 
@@ -562,7 +562,7 @@ Environment┘               ▼
    ```bash
    cd investment-assistant
    python web/app.py
-   # 访问 http://localhost:5000
+   # 访问 http://localhost:5001
    ```
 
 2. **创建总体 Playbook**
@@ -655,7 +655,11 @@ Environment┘               ▼
 #### config.json
 ```json
 {
-  "gemini_api_key": "your_api_key",
+  "openai_api_key": "sk-...",
+  "gemini_api_key": "gk-...",
+  "llm_provider": "gemini",
+  "llm_model_pro": "gemini-3-pro-preview",
+  "llm_model_flash": "gemini-3-flash-preview",
   "auth_enabled": false,
   "auth_password_hash": null
 }
@@ -695,7 +699,7 @@ Environment┘               ▼
 ### 环境要求
 
 - Python 3.9+
-- Gemini API Key（需要支持 Google Search）
+- OpenAI 或 Gemini API Key（至少配置一种）
 
 ### 安装步骤
 
@@ -706,18 +710,27 @@ cd investment-assistant
 # 2. 安装依赖
 pip install -r requirements.txt
 
-# 3. 配置 API Key（二选一）
+# 3. 配置 API Key（OpenAI/Gemini 任选）
 # 方式一：环境变量
-export GEMINI_API_KEY="your_api_key"
+export OPENAI_API_KEY="sk-..."
+# 或
+export GEMINI_API_KEY="gk-..."
 
 # 方式二：首次启动时在界面中输入
+# 方式三：在 ~/.investment-assistant/config.json 中设置 llm_provider / llm_model_pro / llm_model_flash
 
 # 4. 启动 Web 服务
 python web/app.py
 
 # 5. 访问
-open http://localhost:5000
+open http://localhost:5001
 ```
+
+### 模型设置（Pro/Flash）
+- Pro：深度分析（影响评估、深度研究、偏好学习、文件解析）
+- Flash：快速搜索与访谈（新闻/检索、苏格拉底访谈）
+- 默认 Gemini：pro=gemini-3-pro-preview，flash=gemini-3-flash-preview
+- 配置入口：config.json / CLI / Web 偏好页
 
 ### 依赖列表
 
@@ -730,7 +743,7 @@ flask>=2.0.0
 
 ```bash
 # 启用密码保护
-curl -X POST http://localhost:5000/api/auth/setup \
+curl -X POST http://localhost:5001/api/auth/setup \
   -H "Content-Type: application/json" \
   -d '{"password": "your_password", "enable": true}'
 ```
@@ -757,6 +770,9 @@ python assistant.py
 > 查看软银历史     # 查看研究历史
 > 列出持仓         # 显示所有股票
 > 删除软银         # 删除某股票
+> 设置提供商 gemini   # 切换 LLM 提供商
+> 设置模型pro gemini-3-pro-preview   # 切换 Pro 模型
+> 设置模型flash gemini-3-flash-preview # 切换 Flash 模型
 > 帮助            # 显示帮助
 > 退出            # 退出程序
 ```

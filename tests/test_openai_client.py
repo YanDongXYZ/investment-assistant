@@ -27,6 +27,15 @@ class TestOpenAIClientInit:
             c = OpenAIClient(api_key="sk-test")
             assert c.api_key == "sk-test"
             assert c.model == "gpt-5.2"
+            assert c.model_pro == "gpt-5.2"
+            assert c.model_flash == "gpt-5.2"
+
+    def test_model_overrides(self):
+        with patch("core.openai_client.OpenAI"):
+            from core.openai_client import OpenAIClient
+            c = OpenAIClient(api_key="sk-test", model_pro="pro", model_flash="flash")
+            assert c.model_pro == "pro"
+            assert c.model_flash == "flash"
 
     def test_env_key_fallback(self):
         with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-env"}):
@@ -58,6 +67,14 @@ class TestChat:
         messages = call_args.kwargs.get("messages") or call_args[1].get("messages")
         roles = [m["role"] for m in messages]
         assert "assistant" in roles  # 'model' mapped to 'assistant'
+
+    def test_chat_flash_uses_flash_model(self):
+        with patch("core.openai_client.OpenAI") as MockOpenAI:
+            from core.openai_client import OpenAIClient
+            client = OpenAIClient(api_key="sk-test", model_pro="pro", model_flash="flash")
+            client.chat_flash("hello")
+            call_args = client.client.chat.completions.create.call_args
+            assert call_args.kwargs.get("model") == "flash"
 
 
 # ---------------------------------------------------------------------------

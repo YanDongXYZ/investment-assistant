@@ -16,9 +16,11 @@
                 <!-- 左侧：主线主题 -->
                 <div>
                     <h3 class="text-sm font-medium text-gray-500 mb-3">主线主题</h3>
-                    {% if portfolio.market_views and portfolio.market_views.main_themes %}
+                    {% if portfolio.market_views %}
+                    {% set themes = portfolio.market_views.bullish_themes or portfolio.market_views.main_themes or [] %}
+                    {% if themes %}
                     <div class="space-y-2">
-                        {% for theme in portfolio.market_views.main_themes %}
+                        {% for theme in themes %}
                         <div class="flex items-center justify-between p-2 rounded-lg
                             {% if theme.confidence == '高' %}bg-green-50
                             {% elif theme.confidence == '中' %}bg-yellow-50
@@ -36,20 +38,29 @@
                     {% else %}
                     <p class="text-gray-400 text-sm">暂无</p>
                     {% endif %}
+                    {% else %}
+                    <p class="text-gray-400 text-sm">暂无</p>
+                    {% endif %}
                 </div>
 
                 <!-- 右侧：主攻标的 -->
                 <div>
                     <h3 class="text-sm font-medium text-gray-500 mb-3">主攻标的</h3>
-                    {% if portfolio.market_views and portfolio.market_views.focus_stocks %}
+                    {% if portfolio.market_views %}
+                    {% set focus_stocks = portfolio.market_views.focus_stocks or [] %}
+                    {% set display_stocks = focus_stocks if focus_stocks|length > 0 else (stocks or []) %}
+                    {% if display_stocks %}
                     <div class="space-y-2">
-                        {% for stock in portfolio.market_views.focus_stocks %}
+                        {% for stock in display_stocks %}
                         <div class="flex items-center justify-between p-2 bg-blue-50 rounded-lg">
-                            <span class="font-medium text-gray-900">{{ stock.stock }}</span>
-                            <span class="text-xs text-blue-600">{{ stock.theme }}</span>
+                            <span class="font-medium text-gray-900">{{ stock.stock_name or stock.stock or stock.ticker }}</span>
+                            <span class="text-xs text-blue-600">{{ stock.theme or stock.ticker or '' }}</span>
                         </div>
                         {% endfor %}
                     </div>
+                    {% else %}
+                    <p class="text-gray-400 text-sm">暂无</p>
+                    {% endif %}
                     {% else %}
                     <p class="text-gray-400 text-sm">暂无</p>
                     {% endif %}

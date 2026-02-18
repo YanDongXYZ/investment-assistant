@@ -11,7 +11,7 @@ from datetime import datetime
 import json
 import hashlib
 
-from core.openai_client import OpenAIClient
+from core.llm_factory import create_llm_client, get_llm_config, GEMINI_MODELS, normalize_provider
 from core.storage import Storage
 from core.interview import InterviewManager
 from core.environment import EnvironmentCollector
@@ -77,12 +77,23 @@ env_collector = None
 research_engine = None
 preference_learner = None
 
+def reset_client():
+    global client, interview_manager, env_collector, research_engine, preference_learner
+    client = None
+    interview_manager = None
+    env_collector = None
+    research_engine = None
+    preference_learner = None
+
+
 def get_client():
     global client, interview_manager, env_collector, research_engine, preference_learner
     if client is None:
-        api_key = storage.get_api_key()
-        if api_key:
-            client = OpenAIClient(api_key)
+        try:
+            client = create_llm_client(storage)
+        except Exception:
+            client = None
+        if client:
             interview_manager = InterviewManager(client, storage)
             env_collector = EnvironmentCollector(client, storage)
             research_engine = ResearchEngine(client, storage)
@@ -118,6 +129,74 @@ def api_auth_status():
     })
 
 
+@app.route('/api/config/llm', methods=['GET'])
+def api_get_llm_config():
+    """获取 LLM 配置"""
+    config = get_llm_config(storage)
+    return jsonify({
+        'provider': config.get('provider'),
+        'model': config.get('model'),
+        'model_pro': config.get('model_pro'),
+        'model_flash': config.get('model_flash'),
+        'gemini_models': GEMINI_MODELS,
+    })
+
+
+@app.route('/api/config/llm', methods=['POST'])
+def api_set_llm_config():
+    """设置 LLM 配置"""
+    data = request.json or {}
+    provider_raw = data.get('provider')
+    provider = normalize_provider(provider_raw) if provider_raw else None
+    model = (data.get('model') or '').strip()
+    model_pro = (data.get('model_pro') or '').strip()
+    model_flash = (data.get('model_flash') or '').strip()
+
+    if provider_raw and not provider:
+        return jsonify({'success': False, 'error': 'invalid provider'}), 400
+
+    if provider:
+        storage.set_llm_provider(provider)
+    if 'model' in data:
+        storage.set_llm_model(model or None)
+    if 'model_pro' in data:
+        storage.set_llm_model_pro(model_pro or None)
+    if 'model_flash' in data:
+        storage.set_llm_model_flash(model_flash or None)
+
+    reset_client()
+    config = get_llm_config(storage)
+    return jsonify({'success': True, **config})
+
+
+def _get_key_status():
+    return {
+        'openai_set': bool(storage.get_openai_api_key()),
+        'gemini_set': bool(storage.get_gemini_api_key()),
+    }
+
+
+@app.route('/api/config/keys', methods=['POST'])
+def api_set_api_keys():
+    """设置 API Key（不回显明文）"""
+    data = request.json or {}
+    openai_key = (data.get('openai_api_key') or '').strip()
+    gemini_key = (data.get('gemini_api_key') or '').strip()
+
+    if 'openai_api_key' in data:
+        if not openai_key:
+            return jsonify({'success': False, 'error': 'openai_api_key_empty'}), 400
+        storage.set_openai_api_key(openai_key)
+
+    if 'gemini_api_key' in data:
+        if not gemini_key:
+            return jsonify({'success': False, 'error': 'gemini_api_key_empty'}), 400
+        storage.set_gemini_api_key(gemini_key)
+
+    reset_client()
+    return jsonify({'success': True, **_get_key_status()})
+
+
 @app.route('/logout')
 def logout():
     """登出"""
@@ -150,7 +229,28 @@ def index():
 def portfolio():
     """总体 Playbook 页面"""
     playbook = storage.get_portfolio_playbook()
-    return render_template('portfolio.html', playbook=playbook)
+    stock_list = []
+    stocks_dir = storage.base_dir / "stocks"
+    if stocks_dir.exists():
+        for stock_dir in stocks_dir.iterdir():
+            if stock_dir.is_dir():
+                stock_playbook = storage.get_stock_playbook(stock_dir.name)
+                if stock_playbook:
+                    stock_list.append(stock_playbook)
+    return render_template('portfolio.html', playbook=playbook, stocks=stock_list)
+
+@app.route('/settings')
+@requires_auth
+def settings_page():
+    """系统配置页面"""
+    llm_config = get_llm_config(storage)
+    key_status = _get_key_status()
+    return render_template(
+        'settings.html',
+        llm_config=llm_config,
+        gemini_models=GEMINI_MODELS,
+        key_status=key_status,
+    )
 
 @app.route('/stocks')
 @requires_auth
@@ -205,7 +305,11 @@ def preferences_page():
     """用户偏好页面"""
     prefs = storage.get_user_preferences()
     interactions = storage.get_recent_interactions(limit=20)
-    return render_template('preferences.html', preferences=prefs, interactions=interactions)
+    return render_template(
+        'preferences.html',
+        preferences=prefs,
+        interactions=interactions,
+    )
 
 @app.route('/batch-scan')
 def batch_scan_page():
@@ -835,6 +939,6 @@ if __name__ == '__main__':
     print("\n" + "="*50)
     print("投资研究助手 Web 版")
     print("="*50)
-    print("\n访问地址: http://localhost:5000")
+    print("\n访问地址: http://localhost:5001")
     print("按 Ctrl+C 停止服务\n")
-    app.run(debug=True, port=5000)
+    app.run(debug=True, port=5001)

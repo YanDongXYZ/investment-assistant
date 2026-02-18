@@ -1,0 +1,180 @@
+{% extends "base.html" %}
+
+{% block title %}系统配置 - 投资研究助手{% endblock %}
+
+{% block content %}
+<div x-data="settingsPage()" class="space-y-6">
+    <div class="flex items-center justify-between">
+        <div>
+            <h1 class="text-2xl font-bold text-gray-900">系统配置</h1>
+            <p class="text-gray-500 text-sm mt-1">配置 LLM 提供商、模型与 API Key</p>
+        </div>
+        <div class="flex space-x-3">
+            <button @click="saveAll()" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium">
+                保存配置
+            </button>
+        </div>
+    </div>
+
+    <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+        <h2 class="text-lg font-semibold text-gray-900 mb-4">LLM 配置</h2>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">提供商</label>
+                <select x-model="llmProvider" @change="onProviderChange()"
+                    class="w-full p-3 border border-gray-300 rounded-lg">
+                    <option value="openai">OpenAI</option>
+                    <option value="gemini">Gemini</option>
+                </select>
+            </div>
+            <div x-show="llmProvider === 'gemini'">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Gemini Pro 模型</label>
+                <select x-model="llmModelPro" class="w-full p-3 border border-gray-300 rounded-lg">
+                    {% set current_pro = llm_config.model_pro %}
+                    {% if current_pro and current_pro not in gemini_models %}
+                    <option value="{{ current_pro }}" selected>自定义：{{ current_pro }}</option>
+                    {% endif %}
+                    {% for m in gemini_models %}
+                    <option value="{{ m }}" {% if current_pro == m %}selected{% endif %}>{{ m }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div x-show="llmProvider === 'gemini'">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Gemini Flash 模型</label>
+                <select x-model="llmModelFlash" class="w-full p-3 border border-gray-300 rounded-lg">
+                    {% set current_flash = llm_config.model_flash %}
+                    {% if current_flash and current_flash not in gemini_models %}
+                    <option value="{{ current_flash }}" selected>自定义：{{ current_flash }}</option>
+                    {% endif %}
+                    {% for m in gemini_models %}
+                    <option value="{{ m }}" {% if current_flash == m %}selected{% endif %}>{{ m }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div x-show="llmProvider === 'openai'">
+                <label class="block text-sm font-medium text-gray-700 mb-1">OpenAI Pro 模型</label>
+                <input type="text" x-model="llmModelPro"
+                    class="w-full p-3 border border-gray-300 rounded-lg"
+                    placeholder="gpt-5.2">
+            </div>
+            <div x-show="llmProvider === 'openai'">
+                <label class="block text-sm font-medium text-gray-700 mb-1">OpenAI Flash 模型</label>
+                <input type="text" x-model="llmModelFlash"
+                    class="w-full p-3 border border-gray-300 rounded-lg"
+                    placeholder="gpt-5.2">
+            </div>
+        </div>
+    </div>
+
+    <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+        <h2 class="text-lg font-semibold text-gray-900 mb-4">API Key</h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">OpenAI API Key</label>
+                <input type="password" x-model="openaiKey" placeholder="" class="w-full p-3 border border-gray-300 rounded-lg"
+                    :placeholder="openaiKeySet ? '已设置（留空不修改）' : '未设置'">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Gemini API Key</label>
+                <input type="password" x-model="geminiKey" placeholder="" class="w-full p-3 border border-gray-300 rounded-lg"
+                    :placeholder="geminiKeySet ? '已设置（留空不修改）' : '未设置'">
+            </div>
+        </div>
+        <p class="text-xs text-gray-500 mt-2">API Key 不会回显，留空表示不修改。</p>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function settingsPage() {
+    return {
+        llmProvider: {{ llm_config.provider | tojson | safe }},
+        llmModelPro: {{ llm_config.model_pro | tojson | safe }},
+        llmModelFlash: {{ llm_config.model_flash | tojson | safe }},
+        geminiModels: {{ gemini_models | tojson | safe }},
+        openaiKeySet: {{ key_status.openai_set | tojson | safe }},
+        geminiKeySet: {{ key_status.gemini_set | tojson | safe }},
+        openaiKey: '',
+        geminiKey: '',
+
+        init() {
+            if (!this.llmProvider) this.llmProvider = 'gemini';
+            if (!this.llmModelPro) {
+                this.llmModelPro = this.llmProvider === 'gemini'
+                    ? (this.geminiModels[0] || '')
+                    : 'gpt-5.2';
+            }
+            if (!this.llmModelFlash) {
+                this.llmModelFlash = this.llmProvider === 'gemini'
+                    ? (this.geminiModels[1] || this.geminiModels[0] || '')
+                    : 'gpt-5.2';
+            }
+        },
+
+        onProviderChange() {
+            if (this.llmProvider === 'gemini') {
+                if (!this.geminiModels.includes(this.llmModelPro)) {
+                    this.llmModelPro = this.geminiModels[0] || '';
+                }
+                if (!this.geminiModels.includes(this.llmModelFlash)) {
+                    this.llmModelFlash = this.geminiModels[1] || this.geminiModels[0] || '';
+                }
+            }
+        },
+
+        async saveLlmConfig() {
+            const response = await fetch('/api/config/llm', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    provider: this.llmProvider,
+                    model_pro: this.llmModelPro,
+                    model_flash: this.llmModelFlash
+                })
+            });
+            const result = await response.json();
+            if (!result.success) {
+                alert('LLM 配置保存失败: ' + (result.error || 'unknown error'));
+                return false;
+            }
+            this.llmProvider = result.provider;
+            this.llmModelPro = result.model_pro;
+            this.llmModelFlash = result.model_flash;
+            return true;
+        },
+
+        async saveApiKeys() {
+            const payload = {};
+            if (this.openaiKey) payload.openai_api_key = this.openaiKey;
+            if (this.geminiKey) payload.gemini_api_key = this.geminiKey;
+            if (Object.keys(payload).length === 0) return true;
+
+            const response = await fetch('/api/config/keys', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const result = await response.json();
+            if (!result.success) {
+                alert('API Key 保存失败: ' + (result.error || 'unknown error'));
+                return false;
+            }
+            this.openaiKeySet = result.openai_set;
+            this.geminiKeySet = result.gemini_set;
+            this.openaiKey = '';
+            this.geminiKey = '';
+            return true;
+        },
+
+        async saveAll() {
+            const ok1 = await this.saveLlmConfig();
+            if (!ok1) return;
+            const ok2 = await this.saveApiKeys();
+            if (!ok2) return;
+            alert('配置已保存');
+        }
+    }
+}
+</script>
+{% endblock %}

@@ -1,12 +1,4 @@
-"""OpenAI API 客户端封装（替代 Gemini）
-
-目标：尽量保持与原 GeminiClient 一致的接口（chat/chat_with_system/search），
-以便项目在不大改业务逻辑的情况下切换到 GPT-5.2。
-
-说明：原项目的 Gemini search grounding / 结构化新闻搜索依赖 Google Search 工具。
-本版本不依赖任何 API Key 的“基础联网搜索”方案：使用 Google News RSS 抓取新闻条目，
-再用模型把条目整理成 structured news。
-"""
+"""Gemini API 客户端封装（与 OpenAIClient 接口对齐）"""
 
 from __future__ import annotations
 
@@ -19,18 +11,18 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Tuple
 
 try:
-    from openai import OpenAI
+    from google import genai
 except ImportError as e:
-    raise ImportError("请先安装 openai: pip install openai") from e
+    raise ImportError("请先安装 google-genai: pip install google-genai") from e
 
 logger = logging.getLogger(__name__)
 
 
-class OpenAIClient:
-    """OpenAI API 客户端（默认使用 gpt-5.2）"""
+class GeminiClient:
+    """Gemini API 客户端（默认使用 gemini-3-pro-preview）"""
 
     def __init__(
         self,
@@ -39,94 +31,74 @@ class OpenAIClient:
         model_pro: Optional[str] = None,
         model_flash: Optional[str] = None,
     ):
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        self.api_key = api_key or os.getenv("GEMINI_API_KEY")
         if not self.api_key:
-            raise ValueError("请设置 OPENAI_API_KEY 环境变量或在 config.json 中配置 openai_api_key")
+            raise ValueError("请设置 GEMINI_API_KEY 环境变量或在 config.json 中配置 gemini_api_key")
 
-        self.client = OpenAI(api_key=self.api_key)
-        resolved_pro = model_pro or model or "gpt-5.2"
+        self.client = genai.Client(api_key=self.api_key)
+        resolved_pro = model_pro or model or "gemini-3-pro-preview"
         resolved_flash = model_flash or model or resolved_pro
         self._model_pro = resolved_pro
         self._model_flash = resolved_flash
         self.model = resolved_pro
 
-    def _chat(self, messages: List[Dict[str, str]], model: str) -> str:
-        resp = self.client.chat.completions.create(
-            model=model,
-            messages=messages,
-            timeout=120,
-        )
-        return resp.choices[0].message.content or ""
-
-    def _build_messages(self, prompt: str, history: Optional[List[Dict]] = None) -> List[Dict[str, str]]:
-        messages: List[Dict[str, str]] = []
+    def _build_contents(self, prompt: str, history: Optional[List[Dict]] = None) -> List[Dict]:
+        contents: List[Dict] = []
         if history:
             for msg in history:
                 role = msg.get("role")
-                if role in ("assistant", "model"):
-                    role = "assistant"
-                else:
-                    role = "user"
-                messages.append({"role": role, "content": msg.get("content", "")})
-        messages.append({"role": "user", "content": prompt})
-        return messages
+                role = "model" if role in ("assistant", "model") else "user"
+                contents.append({"role": role, "parts": [{"text": msg.get("content", "")}]})
+        contents.append({"role": "user", "parts": [{"text": prompt}]})
+        return contents
 
     def chat(self, prompt: str, history: Optional[List[Dict]] = None) -> str:
-        """普通对话（与 GeminiClient.chat 对齐）"""
         return self.chat_pro(prompt, history)
 
     def chat_pro(self, prompt: str, history: Optional[List[Dict]] = None) -> str:
-        messages = self._build_messages(prompt, history)
-        return self._chat(messages, self._model_pro)
+        contents = self._build_contents(prompt, history)
+        resp = self.client.models.generate_content(model=self._model_pro, contents=contents)
+        text = getattr(resp, "text", None)
+        return text or ""
 
     def chat_flash(self, prompt: str, history: Optional[List[Dict]] = None) -> str:
-        messages = self._build_messages(prompt, history)
-        return self._chat(messages, self._model_flash)
-
-    def _build_messages_with_system(
-        self,
-        system_prompt: str,
-        user_message: str,
-        history: Optional[List[Dict]] = None,
-    ) -> List[Dict[str, str]]:
-        messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
-
-        if history:
-            for msg in history:
-                role = msg.get("role")
-                if role in ("assistant", "model"):
-                    role = "assistant"
-                else:
-                    role = "user"
-                messages.append({"role": role, "content": msg.get("content", "")})
-
-        messages.append({"role": "user", "content": user_message})
-        return messages
+        contents = self._build_contents(prompt, history)
+        resp = self.client.models.generate_content(model=self._model_flash, contents=contents)
+        text = getattr(resp, "text", None)
+        return text or ""
 
     def chat_with_system(self, system_prompt: str, user_message: str,
                          history: Optional[List[Dict]] = None) -> str:
-        """带系统提示的对话（与 GeminiClient.chat_with_system 对齐）"""
         return self.chat_with_system_pro(system_prompt, user_message, history)
 
     def chat_with_system_pro(self, system_prompt: str, user_message: str,
                              history: Optional[List[Dict]] = None) -> str:
-        messages = self._build_messages_with_system(system_prompt, user_message, history)
-        return self._chat(messages, self._model_pro)
+        contents = self._build_contents(user_message, history)
+        resp = self.client.models.generate_content(
+            model=self._model_pro,
+            contents=contents,
+            system_instruction=system_prompt,
+        )
+        text = getattr(resp, "text", None)
+        return text or ""
 
     def chat_with_system_flash(self, system_prompt: str, user_message: str,
                                history: Optional[List[Dict]] = None) -> str:
-        messages = self._build_messages_with_system(system_prompt, user_message, history)
-        return self._chat(messages, self._model_flash)
+        contents = self._build_contents(user_message, history)
+        resp = self.client.models.generate_content(
+            model=self._model_flash,
+            contents=contents,
+            system_instruction=system_prompt,
+        )
+        text = getattr(resp, "text", None)
+        return text or ""
 
     def search(self, query: str, time_range_days: int = 7) -> str:
-        """降级：不进行联网搜索，仅返回提示。
-
-        原 GeminiClient.search 使用 Google Search grounding。
-        """
+        """降级：不进行联网搜索，仅返回提示。"""
         end_date = datetime.now()
         start_date = end_date - timedelta(days=time_range_days)
         return (
-            f"[search disabled] 该版本使用 OpenAI({self.model})，未接入 Google grounding 搜索。\n"
+            f"[search disabled] 该版本使用 Gemini({self.model})，未接入 Google grounding 搜索。\n"
             f"请手动提供资料或上传文件。\n\n"
             f"query={query}\n"
             f"range={start_date.strftime('%Y-%m-%d')}..{end_date.strftime('%Y-%m-%d')}\n"
@@ -143,7 +115,6 @@ class OpenAIClient:
         full_prompt = f"{prompt}\n\n文件内容（截断）:\n{content}"
         return self.chat_pro(full_prompt)
 
-    # 兼容调用方可能使用的属性名
     @property
     def model_pro(self) -> str:
         return self._model_pro
@@ -154,13 +125,10 @@ class OpenAIClient:
         Returns (items, error). Each item: {title, link, pubDate, source}.
         """
         try:
-            # enforce freshness using Google News query operator when:N d
-            # (best-effort; Google may ignore in some cases)
             q_str = query
             if "when:" not in q_str:
                 q_str = f"{q_str} when:{time_range_days}d"
             q = urllib.parse.quote(q_str)
-            # CN zh RSS is generally better for Chinese names; still includes global sources.
             url = f"https://news.google.com/rss/search?q={q}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
             with urllib.request.urlopen(url, timeout=20) as resp:
                 xml_bytes = resp.read()
@@ -197,7 +165,6 @@ class OpenAIClient:
         if not rss_items:
             return []
 
-        # Keep prompt small; provide the raw items and ask for strict JSON.
         compact = []
         for x in rss_items[:8]:
             compact.append({
@@ -234,7 +201,6 @@ class OpenAIClient:
 """
 
         text = self.chat_flash(prompt)
-        # extract json
         m = re.search(r'\{[\s\S]*\}', text)
         if not m:
             return []
@@ -254,18 +220,10 @@ class OpenAIClient:
         time_range_days: int = 7,
         playbook: Optional[Dict] = None,
     ) -> List[Dict]:
-        """结构化新闻搜索。
-
-        优先级：
-        1) Tavily（若设置 TAVILY_API_KEY）→ 更强覆盖、更适合 LLM 的结果
-        2) Google News RSS（无需额外 key）→ 兜底保证可用性
-
-        返回：List[Dict]，第 0 项为 metadata。
-        """
+        """结构化新闻搜索。"""
         end_date = datetime.now()
         start_date = end_date - timedelta(days=time_range_days)
 
-        # dimensions (keep close to gemini_client)
         dims = [
             ("公司核心动态", f"{stock_name} 财报 业绩 公告 管理层 重大事项", "财报发布、重大公告、人事变动、股东变化"),
             ("行业与竞争", f"{stock_name} 竞争对手 行业格局 市场份额 " + " ".join(related_entities[:3]), "竞争对手动态、行业趋势、市场格局变化"),
@@ -277,7 +235,6 @@ class OpenAIClient:
         failed = []
         warnings: List[str] = []
 
-        # Use union search (Tavily + OpenClaw web_search) for better recall.
         from .retrieval import SearchManager, TavilyProvider, OpenClawWebSearchProvider
 
         sm = SearchManager(
@@ -315,7 +272,6 @@ class OpenAIClient:
                 structured = self._rss_items_to_structured_news(stock_name, dim, focus, rss_like)
                 all_news.extend(structured)
 
-        # naive de-dup by title prefix
         seen = set()
         uniq = []
         for n in all_news:
@@ -325,7 +281,6 @@ class OpenAIClient:
             seen.add(t)
             uniq.append(n)
 
-        # sort by importance then date (best-effort)
         imp = {"高": 0, "中": 1, "低": 2}
         uniq.sort(key=lambda x: (imp.get(x.get('importance', '低'), 2), x.get('date', '')), reverse=False)
 

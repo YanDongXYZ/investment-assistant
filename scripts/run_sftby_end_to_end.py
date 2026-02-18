@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.openai_client import OpenAIClient
+from core.llm_factory import create_llm_client
 from core.storage import Storage
 from core.environment import EnvironmentCollector
 from core.research import ResearchEngine
@@ -35,11 +35,10 @@ def main():
     time_range_days = int(os.getenv("IA_DAYS", "7"))
 
     storage = Storage()
-    api_key = storage.get_api_key() or os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise SystemExit("Missing OPENAI_API_KEY")
-
-    client = OpenAIClient(api_key=api_key, model=os.getenv("IA_MODEL", "gpt-5.2"))
+    try:
+        client = create_llm_client(storage, model=os.getenv("IA_MODEL"))
+    except Exception as e:
+        raise SystemExit(str(e))
     env = EnvironmentCollector(client, storage)
     research = ResearchEngine(client, storage)
 

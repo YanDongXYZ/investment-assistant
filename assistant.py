@@ -7,7 +7,7 @@ import sys
 import re
 from typing import Optional, Tuple, Dict, List
 
-from core.openai_client import OpenAIClient
+from core.llm_factory import create_llm_client, normalize_provider
 from core.storage import Storage
 from core.interview import InterviewManager
 from core.environment import EnvironmentCollector
@@ -22,16 +22,14 @@ class InvestmentAssistant:
         self.display = Display()
         self.storage = Storage()
 
-        # 获取 API Key
-        api_key = self.storage.get_api_key()
-        if not api_key:
+        # 获取 API Key（OpenAI 或 Gemini）
+        if not (self.storage.get_openai_api_key() or self.storage.get_gemini_api_key()):
             self._setup_api_key()
-            api_key = self.storage.get_api_key()
 
         try:
-            self.client = OpenAIClient(api_key)
+            self.client = create_llm_client(self.storage)
         except Exception as e:
-            self.display.print_error(f"初始化 OpenAI 客户端失败: {e}")
+            self.display.print_error(f"初始化 LLM 客户端失败: {e}")
             sys.exit(1)
 
         self.interview = InterviewManager(self.client, self.storage)
@@ -44,15 +42,83 @@ class InvestmentAssistant:
 
     def _setup_api_key(self):
         """设置 API Key"""
-        self.display.print_info("首次使用，请设置 OpenAI API Key")
-        self.display.print("请在环境变量 OPENAI_API_KEY 或 ~/.investment-assistant/config.json 的 openai_api_key 中配置")
-        api_key = self.display.input("请输入 OpenAI API Key: ")
-        if api_key.strip():
-            self.storage.set_api_key(api_key.strip())
-            self.display.print_success("API Key 已保存")
-        else:
-            self.display.print_error("API Key 不能为空")
+        self.display.print_info("首次使用，请设置 LLM API Key")
+        provider = self.display.input("选择提供商 (openai/gemini) [gemini]: ").strip().lower()
+        provider = provider or "gemini"
+        provider = normalize_provider(provider)
+        if not provider:
+            self.display.print_error("提供商无效，仅支持 openai 或 gemini")
             sys.exit(1)
+
+        if provider == "openai":
+            self.display.print("请在环境变量 OPENAI_API_KEY 或 ~/.investment-assistant/config.json 的 openai_api_key 中配置")
+            api_key = self.display.input("请输入 OpenAI API Key: ")
+            if api_key.strip():
+                self.storage.set_openai_api_key(api_key.strip())
+            else:
+                self.display.print_error("API Key 不能为空")
+                sys.exit(1)
+        else:
+            self.display.print("请在环境变量 GEMINI_API_KEY 或 ~/.investment-assistant/config.json 的 gemini_api_key 中配置")
+            api_key = self.display.input("请输入 Gemini API Key: ")
+            if api_key.strip():
+                self.storage.set_gemini_api_key(api_key.strip())
+            else:
+                self.display.print_error("API Key 不能为空")
+                sys.exit(1)
+
+        self.storage.set_llm_provider(provider)
+        self.display.print_success("API Key 已保存")
+
+    def _reset_client(self) -> bool:
+        """按当前配置重新初始化客户端"""
+        try:
+            client = create_llm_client(self.storage)
+        except Exception as e:
+            self.display.print_error(f"切换 LLM 失败: {e}")
+            return False
+
+        self.client = client
+        self.interview = InterviewManager(self.client, self.storage)
+        self.environment = EnvironmentCollector(self.client, self.storage)
+        self.research = ResearchEngine(self.client, self.storage)
+        return True
+
+    def _set_llm_provider(self, provider: str):
+        normalized = normalize_provider(provider)
+        if not normalized:
+            self.display.print_error("提供商无效，仅支持 openai 或 gemini")
+            return
+        self.storage.set_llm_provider(normalized)
+        if self._reset_client():
+            self.display.print_success(f"已切换提供商: {normalized}")
+
+    def _set_llm_model(self, model: str):
+        model = (model or "").strip()
+        if not model:
+            self.display.print_error("模型名不能为空")
+            return
+        self.storage.set_llm_model(model)
+        if self._reset_client():
+            self.display.print_success(f"已切换模型: {model}")
+
+    def _set_llm_model_pro(self, model: str):
+        model = (model or "").strip()
+        if not model:
+            self.display.print_error("模型名不能为空")
+            return
+        self.storage.set_llm_model_pro(model)
+        if self._reset_client():
+            self.display.print_success(f"已切换 Pro 模型: {model}")
+
+    def _set_llm_model_flash(self, model: str):
+        model = (model or "").strip()
+        if not model:
+            self.display.print_error("模型名不能为空")
+            return
+        self.storage.set_llm_model_flash(model)
+        if self._reset_client():
+            self.display.print_success(f"已切换 Flash 模型: {model}")
 
     def run(self):
         """运行主循环"""
@@ -97,6 +163,27 @@ class InvestmentAssistant:
         # 帮助
         if lower_input in ["帮助", "help", "?"]:
             self._show_help()
+            return
+
+        # LLM 配置
+        provider_match = re.match(r"(?:设置|切换)提供商\s*(.+)", user_input)
+        if provider_match:
+            self._set_llm_provider(provider_match.group(1))
+            return
+
+        model_pro_match = re.match(r"(?:设置|切换)模型pro\s*(.+)", user_input, flags=re.IGNORECASE)
+        if model_pro_match:
+            self._set_llm_model_pro(model_pro_match.group(1))
+            return
+
+        model_flash_match = re.match(r"(?:设置|切换)模型flash\s*(.+)", user_input, flags=re.IGNORECASE)
+        if model_flash_match:
+            self._set_llm_model_flash(model_flash_match.group(1))
+            return
+
+        model_match = re.match(r"(?:设置|切换)模型\s*(.+)", user_input)
+        if model_match:
+            self._set_llm_model(model_match.group(1))
             return
 
         # 总体 Playbook
@@ -199,6 +286,12 @@ class InvestmentAssistant:
 [cyan]研究流程[/cyan]
   XXX 有新消息     检查 Environment 变化
   查看 XXX 历史    查看研究历史
+
+[cyan]LLM 设置[/cyan]
+  设置提供商 openai|gemini   切换 LLM 提供商
+  设置模型pro <model_id>     切换 Pro 模型
+  设置模型flash <model_id>   切换 Flash 模型
+  设置模型 <model_id>        兼容旧设置（等同于设置 Pro）
 
 [cyan]管理[/cyan]
   列出持仓         显示所有股票

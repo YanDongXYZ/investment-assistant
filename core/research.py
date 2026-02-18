@@ -366,7 +366,7 @@ class ResearchEngine:
             search_results=search_results
         )
 
-        response = self.client.chat(prompt)
+        response = self.client.chat_pro(prompt)
 
         # 解析结论
         conclusion = self._extract_conclusion(response)
