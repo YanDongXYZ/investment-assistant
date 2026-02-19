@@ -93,13 +93,15 @@ def create_llm_client(
     model_pro = resolve_llm_model_pro(storage, provider, model_pro)
     model_flash = resolve_llm_model_flash(storage, provider, model_flash)
 
+    tavily_api_key = storage.get_tavily_api_key()
+
     if provider == "gemini":
         api_key = storage.get_gemini_api_key()
         if not api_key:
             raise ValueError("请设置 GEMINI_API_KEY 环境变量或在 config.json 中配置 gemini_api_key")
-        return GeminiClient(api_key=api_key, model_pro=model_pro, model_flash=model_flash)
+        return GeminiClient(api_key=api_key, model_pro=model_pro, model_flash=model_flash, tavily_api_key=tavily_api_key)
 
     api_key = storage.get_openai_api_key()
     if not api_key:
         raise ValueError("请设置 OPENAI_API_KEY 环境变量或在 config.json 中配置 openai_api_key")
-    return OpenAIClient(api_key=api_key, model_pro=model_pro, model_flash=model_flash)
+    return OpenAIClient(api_key=api_key, model_pro=model_pro, model_flash=model_flash, tavily_api_key=tavily_api_key)

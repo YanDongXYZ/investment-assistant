@@ -1,9 +1,12 @@
 """Environment 采集模块"""
 
 import json
+import logging
 import re
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 from .openai_client import OpenAIClient
 from .storage import Storage
@@ -160,22 +163,36 @@ class EnvironmentCollector:
             "search_metadata": Dict  # 搜索元数据，包含警告信息
         }
         """
+        logger.info(f"[collect_news] Starting collection for {stock_id} ({stock_name}), range={time_range_days}d")
+        
         # 获取 Playbook
         playbook = self.storage.get_stock_playbook(stock_id)
         related_entities = []
         if playbook:
             related_entities = playbook.get("related_entities", [])
+            logger.debug(f"[collect_news] Related entities: {related_entities}")
 
         # 使用多维度结构化新闻搜索
-        raw_result = self.client.search_news_structured(
-            stock_name=stock_name,
-            related_entities=related_entities,
-            time_range_days=time_range_days,
-            playbook=playbook  # 传入 Playbook 以增强搜索
-        )
+        try:
+            raw_result = self.client.search_news_structured(
+                stock_name=stock_name,
+                related_entities=related_entities,
+                time_range_days=time_range_days,
+                playbook=playbook  # 传入 Playbook 以增强搜索
+            )
+        except Exception as e:
+            logger.error(f"[collect_news] search_news_structured exception: {type(e).__name__}: {e}")
+            raw_result = [{
+                "_is_metadata": True,
+                "total_dimensions": 0,
+                "successful_dimensions": 0,
+                "failed_dimensions": [],
+                "search_warnings": [f"搜索过程异常（{type(e).__name__}），已降级为空新闻列表。"],
+            }]
 
         # 兼容降级/异常情况：返回可能不是 List[Dict]
         if isinstance(raw_result, str):
+            logger.error(f"[collect_news] Received string instead of list: {raw_result[:200]}")
             raw_result = [{
                 "_is_metadata": True,
                 "total_dimensions": 0,
@@ -187,6 +204,7 @@ class EnvironmentCollector:
                 ],
             }]
         elif raw_result is None:
+            logger.error(f"[collect_news] Received None from search_news_structured")
             raw_result = [{
                 "_is_metadata": True,
                 "total_dimensions": 0,
@@ -194,6 +212,8 @@ class EnvironmentCollector:
                 "failed_dimensions": [],
                 "search_warnings": ["search_news_structured 返回空值，已降级为空新闻列表。"],
             }]
+
+        logger.debug(f"[collect_news] search_news_structured returned {len(raw_result)} items (including metadata)")
 
         # 提取元数据（第一个元素如果是 metadata）
         search_metadata = None
@@ -213,6 +233,10 @@ class EnvironmentCollector:
                 "failed_dimensions": [],
                 "search_warnings": []
             }
+        
+        logger.info(f"[collect_news] Final result: {len(news_list)} news items, successful_dims={search_metadata.get('successful_dimensions', 0)}/{search_metadata.get('total_dimensions', 0)}")
+        if search_metadata.get('failed_dimensions'):
+            logger.warning(f"[collect_news] Failed dimensions: {search_metadata['failed_dimensions']}")
 
         return {
             "news": news_list,
@@ -383,7 +407,38 @@ class EnvironmentCollector:
             historical_uploads=historical_str
         )
 
-        response = self.client.chat_pro(prompt)
+        # 调用 LLM，带重试（应对 503 等瞬时错误）
+        max_retries = 2
+        response = None
+        last_error = None
+        for attempt in range(max_retries + 1):
+            try:
+                response = self.client.chat_pro(prompt)
+                break
+            except Exception as e:
+                last_error = e
+                logger.warning(f"[assess_impact] chat_pro attempt {attempt+1}/{max_retries+1} failed: {type(e).__name__}: {e}")
+                if attempt < max_retries:
+                    import time
+                    time.sleep(2 * (attempt + 1))  # 退避等待
+
+        if response is None:
+            logger.error(f"[assess_impact] chat_pro all retries exhausted: {last_error}")
+            return {
+                "judgment": {"needs_deep_research": True, "confidence": "低"},
+                "conclusion": {
+                    "reason": f"AI 评估暂时不可用（{type(last_error).__name__}），建议稍后重试",
+                    "action": "建议稍后重试三维度评估"
+                },
+                "research_plan": {
+                    "trigger_reason": "AI 服务暂时不可用",
+                    "core_questions": ["待 AI 服务恢复后重新评估"],
+                    "research_dimensions": ["待定"],
+                    "information_sources": ["待定"],
+                    "search_time_range": time_range
+                },
+                "_error": str(last_error)
+            }
 
         # 解析 JSON 响应
         result, parse_error = self._extract_json(response)

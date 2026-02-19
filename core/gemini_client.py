@@ -30,11 +30,13 @@ class GeminiClient:
         model: Optional[str] = None,
         model_pro: Optional[str] = None,
         model_flash: Optional[str] = None,
+        tavily_api_key: Optional[str] = None,
     ):
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
         if not self.api_key:
             raise ValueError("请设置 GEMINI_API_KEY 环境变量或在 config.json 中配置 gemini_api_key")
 
+        self._tavily_api_key = tavily_api_key or os.getenv("TAVILY_API_KEY")
         self.client = genai.Client(api_key=self.api_key)
         resolved_pro = model_pro or model or "gemini-3-pro-preview"
         resolved_flash = model_flash or model or resolved_pro
@@ -200,7 +202,25 @@ class GeminiClient:
 {compact}
 """
 
-        text = self.chat_flash(prompt)
+        try:
+            text = self.chat_flash(prompt)
+        except Exception as e:
+            logger.error(f"[_rss_items_to_structured_news] chat_flash failed for {dimension}: {type(e).__name__}: {e}")
+            # LLM 不可用时直接返回原始条目（降级）
+            fallback = []
+            for x in compact[:5]:
+                fallback.append({
+                    "date": x.get("date", ""),
+                    "title": x.get("title", ""),
+                    "summary": x.get("title", ""),
+                    "dimension": dimension,
+                    "relevance": "（LLM 不可用，未做筛选）",
+                    "importance": "中",
+                    "source": x.get("source", ""),
+                    "url": x.get("link", ""),
+                })
+            return fallback
+
         m = re.search(r'\{[\s\S]*\}', text)
         if not m:
             return []
@@ -213,6 +233,42 @@ class GeminiClient:
         except Exception:
             return []
 
+    def _is_english_like(self, text: str) -> bool:
+        if not text:
+            return False
+        return bool(re.search(r"[A-Za-z]", text))
+
+    def _collect_english_aliases(
+        self,
+        stock_name: str,
+        related_entities: List[str],
+        playbook: Optional[Dict] = None,
+    ) -> List[str]:
+        aliases: List[str] = []
+        if self._is_english_like(stock_name):
+            aliases.append(stock_name)
+        ticker = (playbook or {}).get("ticker", "") if playbook else ""
+        if ticker and ticker not in aliases:
+            aliases.append(ticker)
+        for ent in related_entities or []:
+            if self._is_english_like(ent) and ent not in aliases:
+                aliases.append(ent)
+        return aliases[:3]
+
+    def _build_english_query(self, dimension: str, aliases: List[str]) -> str:
+        if not aliases:
+            return ""
+        alias_str = " ".join(aliases).strip()
+        if not alias_str:
+            return ""
+        keywords = {
+            "公司核心动态": "earnings financial results announcement management",
+            "行业与竞争": "competitors industry market share",
+            "产品与技术": "product technology innovation R&D patent",
+            "宏观与政策": "policy regulation macro",
+        }
+        return f"{alias_str} {keywords.get(dimension, 'news')}".strip()
+
     def search_news_structured(
         self,
         stock_name: str,
@@ -221,6 +277,8 @@ class GeminiClient:
         playbook: Optional[Dict] = None,
     ) -> List[Dict]:
         """结构化新闻搜索。"""
+        logger.info(f"[search_news_structured] Starting for {stock_name}, range={time_range_days}d")
+
         end_date = datetime.now()
         start_date = end_date - timedelta(days=time_range_days)
 
@@ -235,51 +293,109 @@ class GeminiClient:
         failed = []
         warnings: List[str] = []
 
+        english_aliases = self._collect_english_aliases(stock_name, related_entities, playbook)
+        if english_aliases:
+            logger.debug(f"[search_news_structured] English aliases: {english_aliases}")
+
+        rss_fallback_triggered = False
+        rss_fallback_reason: List[str] = []
+        total_rss_items = 0
+        missing_dims: List[tuple] = []
+
         from .retrieval import SearchManager, TavilyProvider, OpenClawWebSearchProvider
 
+        tavily_key = self._tavily_api_key
+        providers = []
+        if tavily_key:
+            try:
+                providers.append(TavilyProvider(api_key=tavily_key))
+            except Exception as e:
+                logger.error(f"[search_news_structured] TavilyProvider init failed: {e}")
+        try:
+            oc = OpenClawWebSearchProvider()
+            if oc.is_available():
+                providers.append(oc)
+        except Exception as e:
+            logger.error(f"[search_news_structured] OpenClawWebSearchProvider init failed: {e}")
+
         sm = SearchManager(
-            providers=[
-                TavilyProvider() if os.getenv("TAVILY_API_KEY") else None,
-                OpenClawWebSearchProvider(),
-            ],
+            providers=providers,
             cache_ttl_seconds=6 * 3600,
             hard_timeout_seconds=20,
         )
+        logger.info(f"[search_news_structured] {len(sm.providers)} provider(s)")
+
+        def _merge_hits(a, b):
+            merged, seen = [], set()
+            for h in (a or []) + (b or []):
+                url = (h.url or "").strip()
+                if not url or url in seen:
+                    continue
+                seen.add(url)
+                merged.append(h)
+            return merged
+
+        def _dedup_by_title(items: List[Dict]) -> List[Dict]:
+            seen_t, out = set(), []
+            for n in items:
+                t = (n.get('title') or '').lower().strip()[:60]
+                if not t or t in seen_t:
+                    continue
+                seen_t.add(t)
+                out.append(n)
+            return out
 
         if not sm.providers:
             warnings.append("未配置检索 Provider，降级到 Google News RSS。")
+            rss_fallback_triggered = True
+            rss_fallback_reason.append("no_providers")
             for dim, q, focus in dims:
                 items, err = self._fetch_google_news_rss(q, time_range_days=time_range_days, limit=8)
                 if err:
                     failed.append({"dimension": dim, "error": err})
                     continue
+                total_rss_items += len(items)
                 structured = self._rss_items_to_structured_news(stock_name, dim, focus, items)
                 all_news.extend(structured)
         else:
             warnings.append("新闻来源=Tavily + Brave Search（union）。")
             for dim, q, focus in dims:
-                hits = sm.search(q, max_results=8, topic="news", depth="basic")
+                cn_hits = sm.search(q, max_results=8, topic="news", depth="basic")
+                en_hits = []
+                en_query = self._build_english_query(dim, english_aliases)
+                if en_query:
+                    en_hits = sm.search(en_query, max_results=8, topic="news", depth="basic")
+
+                hits = _merge_hits(cn_hits, en_hits)
+                if not hits:
+                    missing_dims.append((dim, q, focus))
+
                 rss_like = [
-                    {
-                        "title": h.title,
-                        "source": h.provider,
-                        "pubDate": h.published or "",
-                        "link": h.url,
-                    }
-                    for h in hits
-                    if h.title and h.url
+                    {"title": h.title, "source": h.provider, "pubDate": h.published or "", "link": h.url}
+                    for h in hits if h.title and h.url
                 ]
                 structured = self._rss_items_to_structured_news(stock_name, dim, focus, rss_like)
                 all_news.extend(structured)
 
-        seen = set()
-        uniq = []
-        for n in all_news:
-            t = (n.get('title') or '').lower().strip()[:60]
-            if not t or t in seen:
-                continue
-            seen.add(t)
-            uniq.append(n)
+            uniq_pre = _dedup_by_title(all_news)
+            if len(uniq_pre) < 10 or missing_dims:
+                rss_fallback_triggered = True
+                if len(uniq_pre) < 10:
+                    rss_fallback_reason.append("low_results")
+                if missing_dims:
+                    rss_fallback_reason.append("missing_dimensions")
+                dims_to_fetch = dims if len(uniq_pre) < 10 else missing_dims
+                logger.info(f"[search_news_structured] RSS fallback: uniq={len(uniq_pre)}, missing={len(missing_dims)}")
+                for dim, q, focus in dims_to_fetch:
+                    items, err = self._fetch_google_news_rss(q, time_range_days=time_range_days, limit=8)
+                    if err:
+                        failed.append({"dimension": dim, "error": err})
+                        continue
+                    total_rss_items += len(items)
+                    structured = self._rss_items_to_structured_news(stock_name, dim, focus, items)
+                    all_news.extend(structured)
+
+        uniq = _dedup_by_title(all_news)
 
         imp = {"高": 0, "中": 1, "低": 2}
         uniq.sort(key=lambda x: (imp.get(x.get('importance', '低'), 2), x.get('date', '')), reverse=False)
@@ -289,6 +405,9 @@ class GeminiClient:
             "total_dimensions": len(dims),
             "successful_dimensions": len(dims) - len(failed),
             "failed_dimensions": failed,
+            "rss_fallback_triggered": rss_fallback_triggered,
+            "rss_fallback_reason": rss_fallback_reason,
+            "total_rss_items": total_rss_items,
             "search_warnings": [
                 *warnings,
                 f"range={start_date.strftime('%Y-%m-%d')}..{end_date.strftime('%Y-%m-%d')}",
@@ -296,6 +415,7 @@ class GeminiClient:
             ],
         }
 
+        logger.info(f"[search_news_structured] Final: {len(uniq)} items, fallback={rss_fallback_triggered}")
         result = uniq[:20]
         result.insert(0, metadata)
         return result

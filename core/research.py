@@ -1,10 +1,13 @@
 """Deep Research 执行模块"""
 
 import json
+import logging
 import re
 import os
 from typing import Dict, List, Optional
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 from .openai_client import OpenAIClient
 from .storage import Storage
@@ -366,7 +369,35 @@ class ResearchEngine:
             search_results=search_results
         )
 
-        response = self.client.chat_pro(prompt)
+        # 调用 LLM，带重试（应对 503 等瞬时错误）
+        max_retries = 2
+        response = None
+        last_error = None
+        for attempt in range(max_retries + 1):
+            try:
+                response = self.client.chat_pro(prompt)
+                break
+            except Exception as e:
+                last_error = e
+                logger.warning(f"[execute_research] chat_pro attempt {attempt+1}/{max_retries+1} failed: {type(e).__name__}: {e}")
+                if attempt < max_retries:
+                    import time as _time
+                    _time.sleep(2 * (attempt + 1))
+
+        if response is None:
+            logger.error(f"[execute_research] chat_pro all retries exhausted: {last_error}")
+            return {
+                "full_report": f"AI 服务暂时不可用（{type(last_error).__name__}），请稍后重试。",
+                "conclusion": {
+                    "action": "hold",
+                    "confidence": "低",
+                    "key_finding": "AI 研究服务暂时不可用",
+                    "summary": f"由于 AI 服务暂时不可用（{last_error}），无法完成深度研究，建议稍后重试。"
+                },
+                "key_findings": ["AI 服务暂时不可用，请稍后重试"],
+                "search_results": search_results,
+                "_error": str(last_error)
+            }
 
         # 解析结论
         conclusion = self._extract_conclusion(response)
@@ -401,9 +432,10 @@ class ResearchEngine:
         - 结果带缓存/预算，降低 SIGKILL 风险
         """
 
+        tavily_key = self.storage.get_tavily_api_key()
         sm = SearchManager(
             providers=[
-                TavilyProvider() if os.getenv("TAVILY_API_KEY") else None,
+                TavilyProvider(api_key=tavily_key) if tavily_key else None,
                 OpenClawWebSearchProvider(),
             ],
             cache_ttl_seconds=12 * 3600,

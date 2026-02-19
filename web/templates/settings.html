@@ -68,7 +68,7 @@
 
     <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
         <h2 class="text-lg font-semibold text-gray-900 mb-4">API Key</h2>
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">OpenAI API Key</label>
                 <input type="password" x-model="openaiKey" placeholder="" class="w-full p-3 border border-gray-300 rounded-lg"
@@ -79,8 +79,14 @@
                 <input type="password" x-model="geminiKey" placeholder="" class="w-full p-3 border border-gray-300 rounded-lg"
                     :placeholder="geminiKeySet ? '已设置（留空不修改）' : '未设置'">
             </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Tavily API Key</label>
+                <input type="password" x-model="tavilyKey" placeholder="" class="w-full p-3 border border-gray-300 rounded-lg"
+                    :placeholder="tavilyKeySet ? '已设置（留空不修改）' : '未设置'">
+            </div>
         </div>
         <p class="text-xs text-gray-500 mt-2">API Key 不会回显，留空表示不修改。</p>
+        <p x-show="!tavilyKeySet" class="text-xs text-amber-600 mt-1">未配置 Tavily API Key，市场动态采集可能为空。</p>
     </div>
 </div>
 {% endblock %}
@@ -95,8 +101,10 @@ function settingsPage() {
         geminiModels: {{ gemini_models | tojson | safe }},
         openaiKeySet: {{ key_status.openai_set | tojson | safe }},
         geminiKeySet: {{ key_status.gemini_set | tojson | safe }},
+        tavilyKeySet: {{ key_status.tavily_set | tojson | safe }},
         openaiKey: '',
         geminiKey: '',
+        tavilyKey: '',
 
         init() {
             if (!this.llmProvider) this.llmProvider = 'gemini';
@@ -148,6 +156,7 @@ function settingsPage() {
             const payload = {};
             if (this.openaiKey) payload.openai_api_key = this.openaiKey;
             if (this.geminiKey) payload.gemini_api_key = this.geminiKey;
+            if (this.tavilyKey) payload.tavily_api_key = this.tavilyKey;
             if (Object.keys(payload).length === 0) return true;
 
             const response = await fetch('/api/config/keys', {
@@ -162,8 +171,10 @@ function settingsPage() {
             }
             this.openaiKeySet = result.openai_set;
             this.geminiKeySet = result.gemini_set;
+            this.tavilyKeySet = result.tavily_set;
             this.openaiKey = '';
             this.geminiKey = '';
+            this.tavilyKey = '';
             return true;
         },
 

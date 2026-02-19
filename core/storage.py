@@ -47,6 +47,11 @@ class Storage:
         config = self.get_config()
         return config.get("gemini_api_key") or os.getenv("GEMINI_API_KEY")
 
+    def get_tavily_api_key(self) -> Optional[str]:
+        """获取 Tavily API Key"""
+        config = self.get_config()
+        return config.get("tavily_api_key") or os.getenv("TAVILY_API_KEY")
+
     def get_api_key(self) -> Optional[str]:
         """获取 API Key（优先 OpenAI，兼容 Gemini）"""
         return self.get_openai_api_key() or self.get_gemini_api_key()
@@ -61,6 +66,12 @@ class Storage:
         """设置 Gemini API Key"""
         config = self.get_config()
         config["gemini_api_key"] = api_key
+        self.save_config(config)
+
+    def set_tavily_api_key(self, api_key: str):
+        """设置 Tavily API Key"""
+        config = self.get_config()
+        config["tavily_api_key"] = api_key
         self.save_config(config)
 
     def set_api_key(self, api_key: str):

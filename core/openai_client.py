@@ -38,11 +38,13 @@ class OpenAIClient:
         model: Optional[str] = None,
         model_pro: Optional[str] = None,
         model_flash: Optional[str] = None,
+        tavily_api_key: Optional[str] = None,
     ):
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         if not self.api_key:
             raise ValueError("请设置 OPENAI_API_KEY 环境变量或在 config.json 中配置 openai_api_key")
 
+        self._tavily_api_key = tavily_api_key or os.getenv("TAVILY_API_KEY")
         self.client = OpenAI(api_key=self.api_key)
         resolved_pro = model_pro or model or "gpt-5.2"
         resolved_flash = model_flash or model or resolved_pro
@@ -233,7 +235,25 @@ class OpenAIClient:
 {compact}
 """
 
-        text = self.chat_flash(prompt)
+        try:
+            text = self.chat_flash(prompt)
+        except Exception as e:
+            logger.error(f"[_rss_items_to_structured_news] chat_flash failed for {dimension}: {type(e).__name__}: {e}")
+            # LLM 不可用时直接返回原始条目（降级）
+            fallback = []
+            for x in compact[:5]:
+                fallback.append({
+                    "date": x.get("date", ""),
+                    "title": x.get("title", ""),
+                    "summary": x.get("title", ""),
+                    "dimension": dimension,
+                    "relevance": "（LLM 不可用，未做筛选）",
+                    "importance": "中",
+                    "source": x.get("source", ""),
+                    "url": x.get("link", ""),
+                })
+            return fallback
+
         # extract json
         m = re.search(r'\{[\s\S]*\}', text)
         if not m:
@@ -246,6 +266,53 @@ class OpenAIClient:
             return out[:5]
         except Exception:
             return []
+
+    def _is_english_like(self, text: str) -> bool:
+        if not text:
+            return False
+        return bool(re.search(r"[A-Za-z]", text))
+
+    def _collect_english_aliases(
+        self,
+        stock_name: str,
+        related_entities: List[str],
+        playbook: Optional[Dict] = None,
+    ) -> List[str]:
+        aliases: List[str] = []
+
+        def add_alias(value: str) -> None:
+            v = (value or "").strip()
+            if not v or v in aliases:
+                return
+            aliases.append(v)
+
+        if self._is_english_like(stock_name):
+            add_alias(stock_name)
+
+        ticker = (playbook or {}).get("ticker", "") if playbook else ""
+        if ticker:
+            add_alias(ticker)
+
+        for ent in related_entities or []:
+            if self._is_english_like(ent):
+                add_alias(ent)
+
+        return aliases[:3]
+
+    def _build_english_query(self, dimension: str, aliases: List[str]) -> str:
+        if not aliases:
+            return ""
+        alias_str = " ".join([a for a in aliases if a]).strip()
+        if not alias_str:
+            return ""
+
+        keywords = {
+            "公司核心动态": "earnings financial results announcement management",
+            "行业与竞争": "competitors industry market share",
+            "产品与技术": "product technology innovation R&D patent",
+            "宏观与政策": "policy regulation macro",
+        }
+        return f"{alias_str} {keywords.get(dimension, 'news')}".strip()
 
     def search_news_structured(
         self,
@@ -262,6 +329,8 @@ class OpenAIClient:
 
         返回：List[Dict]，第 0 项为 metadata。
         """
+        logger.info(f"[search_news_structured] Starting for {stock_name}, range={time_range_days}d, entities={related_entities[:2]}")
+        
         end_date = datetime.now()
         start_date = end_date - timedelta(days=time_range_days)
 
@@ -277,31 +346,111 @@ class OpenAIClient:
         failed = []
         warnings: List[str] = []
 
+        english_aliases = self._collect_english_aliases(stock_name, related_entities, playbook)
+        if english_aliases:
+            logger.debug(f"[search_news_structured] English aliases: {english_aliases}")
+
+        rss_fallback_triggered = False
+        rss_fallback_reason: List[str] = []
+        total_rss_items = 0
+        missing_dims: List[tuple] = []
+
         # Use union search (Tavily + OpenClaw web_search) for better recall.
         from .retrieval import SearchManager, TavilyProvider, OpenClawWebSearchProvider
 
+        tavily_key = self._tavily_api_key
+        logger.debug(f"[search_news_structured] Tavily key available: {bool(tavily_key)}")
+        
+        providers = []
+        
+        # Initialize Tavily provider
+        if tavily_key:
+            try:
+                tavily_provider = TavilyProvider(api_key=tavily_key)
+                providers.append(tavily_provider)
+                logger.debug(f"[search_news_structured] TavilyProvider initialized successfully")
+            except Exception as e:
+                logger.error(f"[search_news_structured] Failed to initialize TavilyProvider: {e}")
+        
+        # Always try OpenClaw provider
+        try:
+            openclaw_provider = OpenClawWebSearchProvider()
+            if openclaw_provider.is_available():
+                providers.append(openclaw_provider)
+                logger.debug(f"[search_news_structured] OpenClawWebSearchProvider initialized successfully")
+            else:
+                logger.debug(f"[search_news_structured] OpenClawWebSearchProvider not available (missing config)")
+        except Exception as e:
+            logger.error(f"[search_news_structured] Failed to initialize OpenClawWebSearchProvider: {e}")
+        
         sm = SearchManager(
-            providers=[
-                TavilyProvider() if os.getenv("TAVILY_API_KEY") else None,
-                OpenClawWebSearchProvider(),
-            ],
+            providers=providers,
             cache_ttl_seconds=6 * 3600,
             hard_timeout_seconds=20,
         )
+        
+        logger.info(f"[search_news_structured] SearchManager initialized with {len(sm.providers)} provider(s)")
+        for p in sm.providers:
+            logger.debug(f"[search_news_structured] - Provider: {p.name}, available={p.is_available()}")
+
+        def _merge_hits(primary_hits, secondary_hits):
+            merged = []
+            seen = set()
+            for h in (primary_hits or []) + (secondary_hits or []):
+                url = (h.url or "").strip()
+                if not url or url in seen:
+                    continue
+                seen.add(url)
+                merged.append(h)
+            return merged
+
+        def _dedup_by_title(items: List[Dict]) -> List[Dict]:
+            seen_titles = set()
+            uniq_items = []
+            for n in items:
+                t = (n.get('title') or '').lower().strip()[:60]
+                if not t or t in seen_titles:
+                    continue
+                seen_titles.add(t)
+                uniq_items.append(n)
+            return uniq_items
 
         if not sm.providers:
             warnings.append("未配置检索 Provider，降级到 Google News RSS。")
+            rss_fallback_triggered = True
+            rss_fallback_reason.append("no_providers")
+            logger.warning(f"[search_news_structured] No providers available, falling back to Google News RSS")
             for dim, q, focus in dims:
+                logger.debug(f"[search_news_structured] Fetching Google News RSS for dimension: {dim}")
                 items, err = self._fetch_google_news_rss(q, time_range_days=time_range_days, limit=8)
                 if err:
+                    logger.error(f"[search_news_structured] RSS fetch failed for {dim}: {err}")
                     failed.append({"dimension": dim, "error": err})
                     continue
+                logger.info(f"[search_news_structured] Got {len(items)} RSS items for {dim}")
+                total_rss_items += len(items)
                 structured = self._rss_items_to_structured_news(stock_name, dim, focus, items)
+                logger.debug(f"[search_news_structured] Structured {len(structured)} news items for {dim}")
                 all_news.extend(structured)
         else:
             warnings.append("新闻来源=Tavily + Brave Search（union）。")
+            logger.info(f"[search_news_structured] Using union search (Tavily + Brave)")
             for dim, q, focus in dims:
-                hits = sm.search(q, max_results=8, topic="news", depth="basic")
+                logger.debug(f"[search_news_structured] Searching dimension: {dim}, query: {q[:60]}")
+                cn_hits = sm.search(q, max_results=8, topic="news", depth="basic")
+                logger.info(f"[search_news_structured] Got {len(cn_hits)} hits for {dim} (cn)")
+
+                en_hits = []
+                en_query = self._build_english_query(dim, english_aliases)
+                if en_query:
+                    logger.debug(f"[search_news_structured] Searching dimension: {dim}, en_query: {en_query[:60]}")
+                    en_hits = sm.search(en_query, max_results=8, topic="news", depth="basic")
+                    logger.info(f"[search_news_structured] Got {len(en_hits)} hits for {dim} (en)")
+
+                hits = _merge_hits(cn_hits, en_hits)
+                if not hits:
+                    missing_dims.append((dim, q, focus))
+
                 rss_like = [
                     {
                         "title": h.title,
@@ -312,18 +461,42 @@ class OpenAIClient:
                     for h in hits
                     if h.title and h.url
                 ]
+                logger.debug(f"[search_news_structured] Converted {len(rss_like)} hits to rss_like format for {dim}")
+                
                 structured = self._rss_items_to_structured_news(stock_name, dim, focus, rss_like)
+                logger.info(f"[search_news_structured] Structured {len(structured)} news items for {dim}")
                 all_news.extend(structured)
 
+            uniq_pre = _dedup_by_title(all_news)
+            if len(uniq_pre) < 10 or missing_dims:
+                rss_fallback_triggered = True
+                if len(uniq_pre) < 10:
+                    rss_fallback_reason.append("low_results")
+                if missing_dims:
+                    rss_fallback_reason.append("missing_dimensions")
+
+                dims_to_fetch = dims if len(uniq_pre) < 10 else missing_dims
+                logger.info(
+                    f"[search_news_structured] Triggering RSS fallback: uniq={len(uniq_pre)}, missing_dims={len(missing_dims)}"
+                )
+
+                for dim, q, focus in dims_to_fetch:
+                    logger.debug(f"[search_news_structured] RSS fallback for dimension: {dim}")
+                    items, err = self._fetch_google_news_rss(q, time_range_days=time_range_days, limit=8)
+                    if err:
+                        logger.error(f"[search_news_structured] RSS fallback failed for {dim}: {err}")
+                        failed.append({"dimension": dim, "error": err})
+                        continue
+                    logger.info(f"[search_news_structured] RSS fallback got {len(items)} items for {dim}")
+                    total_rss_items += len(items)
+                    structured = self._rss_items_to_structured_news(stock_name, dim, focus, items)
+                    logger.debug(f"[search_news_structured] RSS fallback structured {len(structured)} items for {dim}")
+                    all_news.extend(structured)
+
         # naive de-dup by title prefix
-        seen = set()
-        uniq = []
-        for n in all_news:
-            t = (n.get('title') or '').lower().strip()[:60]
-            if not t or t in seen:
-                continue
-            seen.add(t)
-            uniq.append(n)
+        uniq = _dedup_by_title(all_news)
+
+        logger.info(f"[search_news_structured] After dedup: {len(uniq)} unique news items")
 
         # sort by importance then date (best-effort)
         imp = {"高": 0, "中": 1, "低": 2}
@@ -334,6 +507,9 @@ class OpenAIClient:
             "total_dimensions": len(dims),
             "successful_dimensions": len(dims) - len(failed),
             "failed_dimensions": failed,
+            "rss_fallback_triggered": rss_fallback_triggered,
+            "rss_fallback_reason": rss_fallback_reason,
+            "total_rss_items": total_rss_items,
             "search_warnings": [
                 *warnings,
                 f"range={start_date.strftime('%Y-%m-%d')}..{end_date.strftime('%Y-%m-%d')}",
@@ -341,6 +517,10 @@ class OpenAIClient:
             ],
         }
 
+        logger.info(
+            f"[search_news_structured] Final result: {len(uniq)} items (successful_dims={metadata['successful_dimensions']}/{metadata['total_dimensions']}, rss_fallback={metadata['rss_fallback_triggered']})"
+        )
+        
         result = uniq[:20]
         result.insert(0, metadata)
         return result

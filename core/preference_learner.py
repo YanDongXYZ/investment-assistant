@@ -1,9 +1,12 @@
 """用户偏好学习模块"""
 
 import json
+import logging
 import re
 from typing import Dict, List, Optional
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 from .openai_client import OpenAIClient
 from .storage import Storage
@@ -154,7 +157,11 @@ class PreferenceLearner:
 
         # 调用 AI 提取偏好
         prompt = PREFERENCE_EXTRACTION_PROMPT.format(interaction_data=interaction_text)
-        response = self.client.chat_pro(prompt)
+        try:
+            response = self.client.chat_pro(prompt)
+        except Exception as e:
+            logger.error(f"[extract_preferences] chat_pro failed: {type(e).__name__}: {e}")
+            return {"extracted_preferences": [], "preference_summary": {}, "_error": str(e)}
 
         # 解析结果
         result = self._extract_json(response)

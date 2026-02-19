@@ -173,6 +173,7 @@ def _get_key_status():
     return {
         'openai_set': bool(storage.get_openai_api_key()),
         'gemini_set': bool(storage.get_gemini_api_key()),
+        'tavily_set': bool(storage.get_tavily_api_key()),
     }
 
 
@@ -182,6 +183,7 @@ def api_set_api_keys():
     data = request.json or {}
     openai_key = (data.get('openai_api_key') or '').strip()
     gemini_key = (data.get('gemini_api_key') or '').strip()
+    tavily_key = (data.get('tavily_api_key') or '').strip()
 
     if 'openai_api_key' in data:
         if not openai_key:
@@ -192,6 +194,11 @@ def api_set_api_keys():
         if not gemini_key:
             return jsonify({'success': False, 'error': 'gemini_api_key_empty'}), 400
         storage.set_gemini_api_key(gemini_key)
+
+    if 'tavily_api_key' in data:
+        if not tavily_key:
+            return jsonify({'success': False, 'error': 'tavily_api_key_empty'}), 400
+        storage.set_tavily_api_key(tavily_key)
 
     reset_client()
     return jsonify({'success': True, **_get_key_status()})
@@ -469,7 +476,12 @@ def api_collect_environment(stock_id):
     stock_name = playbook.get('stock_name', stock_id) if playbook else stock_id
 
     # 采集新闻（现在返回包含元数据的字典）
-    news_result = env_collector.collect_news(stock_id, stock_name, days)
+    try:
+        news_result = env_collector.collect_news(stock_id, stock_name, days)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"collect_news failed for {stock_id}: {type(e).__name__}: {e}")
+        news_result = {'news': [], 'search_metadata': {'error': str(e)}}
     news = news_result.get('news', [])
     search_metadata = news_result.get('search_metadata', {})
 
@@ -519,13 +531,23 @@ def api_assess_impact(stock_id):
     uploaded_files = data.get('uploaded_files', [])
     time_range = data.get('time_range', '7d')
 
-    assessment = env_collector.assess_impact(
-        stock_id=stock_id,
-        time_range=time_range,
-        auto_collected=news,
-        user_uploaded=uploaded_files
-    )
-    return jsonify(assessment)
+    try:
+        assessment = env_collector.assess_impact(
+            stock_id=stock_id,
+            time_range=time_range,
+            auto_collected=news,
+            user_uploaded=uploaded_files
+        )
+        return jsonify(assessment)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"assess_impact failed: {type(e).__name__}: {e}")
+        return jsonify({
+            'error': f'评估失败: {type(e).__name__}',
+            'message': str(e),
+            'judgment': {'needs_deep_research': True, 'confidence': '低'},
+            'conclusion': {'reason': '评估服务暂时不可用，建议稍后重试', 'action': '稍后重试'}
+        }), 500
 
 @app.route('/api/research/<stock_id>/adjust-plan', methods=['POST'])
 def api_adjust_plan(stock_id):
@@ -581,7 +603,15 @@ def api_adjust_plan(stock_id):
 }}
 ```"""
 
-    response = client.chat(prompt)
+    try:
+        response = client.chat(prompt)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"adjust-plan chat failed: {type(e).__name__}: {e}")
+        return jsonify({
+            'adjustment_summary': f'AI 服务暂时不可用（{type(e).__name__}），请稍后重试',
+            'updated_plan': current_plan
+        }), 500
 
     # 解析响应
     import re
@@ -664,7 +694,12 @@ def api_follow_up_research(stock_id):
 
 请直接回答："""
 
-    response = client.chat(prompt)
+    try:
+        response = client.chat(prompt)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"ask-question chat failed: {type(e).__name__}: {e}")
+        return jsonify({'answer': f'AI 服务暂时不可用（{type(e).__name__}），请稍后重试'}), 500
 
     return jsonify({'answer': response})
 
@@ -686,7 +721,17 @@ def api_execute_research(stock_id):
         'user_uploaded': []
     }
 
-    result = research_engine.execute_research(stock_id, research_plan, environment_data)
+    try:
+        result = research_engine.execute_research(stock_id, research_plan, environment_data)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"execute_research failed: {type(e).__name__}: {e}")
+        return jsonify({
+            'error': f'研究执行失败: {type(e).__name__}',
+            'message': str(e),
+            'full_report': '研究服务暂时不可用，请稍后重试。',
+            'conclusion': {'action': 'hold', 'confidence': '低', 'summary': '服务暂时不可用'}
+        }), 500
 
     # 保存研究记录
     assessment = data.get('assessment', {})
@@ -854,7 +899,12 @@ def api_scan_single_stock(stock_id):
     stock_name = playbook.get('stock_name', stock_id) if playbook else stock_id
 
     # 采集新闻（现在返回包含元数据的字典）
-    news_result = env_collector.collect_news(stock_id, stock_name, days)
+    try:
+        news_result = env_collector.collect_news(stock_id, stock_name, days)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"batch_scan collect_news failed for {stock_id}: {type(e).__name__}: {e}")
+        news_result = {'news': [], 'search_metadata': {'error': str(e)}}
     news = news_result.get('news', [])
     search_metadata = news_result.get('search_metadata', {})
 
@@ -922,7 +972,17 @@ def api_batch_research_stock(stock_id):
         'user_uploaded': []
     }
 
-    result = research_engine.execute_research(stock_id, research_plan, environment_data)
+    try:
+        result = research_engine.execute_research(stock_id, research_plan, environment_data)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"batch_scan execute_research failed: {type(e).__name__}: {e}")
+        return jsonify({
+            'error': f'研究执行失败: {type(e).__name__}',
+            'message': str(e),
+            'full_report': '研究服务暂时不可用，请稍后重试。',
+            'conclusion': {'action': 'hold', 'confidence': '低', 'summary': '服务暂时不可用'}
+        }), 500
 
     # 保存研究记录
     assessment = data.get('assessment', {})

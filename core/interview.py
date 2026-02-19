@@ -1,8 +1,11 @@
 """苏格拉底访谈模块"""
 
 import json
+import logging
 import re
 from typing import Optional, Dict, List, Tuple
+
+logger = logging.getLogger(__name__)
 
 from .openai_client import OpenAIClient
 from .storage import Storage
@@ -228,7 +231,13 @@ class InterviewManager:
             conversation_history=self._format_history()
         )
 
-        response = self.client.chat_flash(prompt)
+        try:
+            response = self.client.chat_flash(prompt)
+        except Exception as e:
+            logger.error(f"[continue_portfolio_interview] chat_flash failed: {type(e).__name__}: {e}")
+            error_msg = f"AI 服务暂时不可用（{type(e).__name__}），请稍后再继续对话。"
+            self.conversation_history.append({"role": "assistant", "content": error_msg})
+            return error_msg, None
 
         # 检查是否是总结
         playbook = self._extract_json(response)
@@ -240,8 +249,6 @@ class InterviewManager:
         else:
             self.conversation_history.append({"role": "assistant", "content": response})
             return response, None
-
-    # ==================== 个股 Playbook 访谈 ====================
 
     def start_stock_interview(self, stock_name: str) -> str:
         """开始个股 Playbook 访谈"""
@@ -280,7 +287,13 @@ class InterviewManager:
             conversation_history=self._format_history()
         )
 
-        response = self.client.chat_flash(prompt)
+        try:
+            response = self.client.chat_flash(prompt)
+        except Exception as e:
+            logger.error(f"[continue_stock_interview] chat_flash failed: {type(e).__name__}: {e}")
+            error_msg = f"AI 服务暂时不可用（{type(e).__name__}），请稍后再继续对话。"
+            self.conversation_history.append({"role": "assistant", "content": error_msg})
+            return error_msg, None
 
         # 检查是否是总结
         playbook = self._extract_json(response)

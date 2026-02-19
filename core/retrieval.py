@@ -51,39 +51,56 @@ class SearchProvider:
 class TavilyProvider(SearchProvider):
     name = "tavily"
 
-    def __init__(self):
+    def __init__(self, api_key: Optional[str] = None):
         from .tavily_search import TavilySearch
 
-        self._tav = TavilySearch()
+        self._api_key = api_key or os.getenv("TAVILY_API_KEY")
+        try:
+            self._tav = TavilySearch(api_key=self._api_key)
+            logger.info(f"[TavilyProvider] Initialized with api_key set: {bool(self._api_key)}")
+        except Exception as e:
+            logger.error(f"[TavilyProvider] Initialization failed: {e}")
+            self._tav = None
 
     def is_available(self) -> bool:
-        return bool(os.getenv("TAVILY_API_KEY"))
+        available = bool(self._api_key) and self._tav is not None
+        logger.debug(f"[TavilyProvider.is_available] {available} (api_key={bool(self._api_key)}, tav_client={self._tav is not None})")
+        return available
 
     def search(self, query: str, *, max_results: int = 5, topic: str = "news", depth: str = "basic") -> List[SearchResult]:
-        resp = self._tav.search(
-            query,
-            max_results=max_results,
-            topic=topic,
-            depth=depth,
-            include_answer=False,
-            include_raw_content=False,
-        )
-        results = self._tav.normalize_results(resp)
-        out: List[SearchResult] = []
-        for r in results:
-            if not r.title or not r.url:
-                continue
-            out.append(
-                SearchResult(
-                    title=r.title,
-                    url=r.url,
-                    snippet=r.content or "",
-                    provider=self.name,
-                    published=r.published_date,
-                    score=r.score,
-                )
+        logger.info(f"[TavilyProvider.search] query={query[:60]}, max_results={max_results}, topic={topic}, depth={depth}")
+        try:
+            resp = self._tav.search(
+                query,
+                max_results=max_results,
+                topic=topic,
+                depth=depth,
+                include_answer=False,
+                include_raw_content=False,
             )
-        return out
+            logger.debug(f"[TavilyProvider.search] Tavily API response: {json.dumps(resp, ensure_ascii=False)[:200]}")
+            results = self._tav.normalize_results(resp)
+            logger.info(f"[TavilyProvider.search] Normalized {len(results)} results")
+            out: List[SearchResult] = []
+            for r in results:
+                if not r.title or not r.url:
+                    logger.debug(f"[TavilyProvider.search] Skipping result without title/url: {r.title}")
+                    continue
+                out.append(
+                    SearchResult(
+                        title=r.title,
+                        url=r.url,
+                        snippet=r.content or "",
+                        provider=self.name,
+                        published=r.published_date,
+                        score=r.score,
+                    )
+                )
+            logger.info(f"[TavilyProvider.search] Returning {len(out)} valid SearchResult objects")
+            return out
+        except Exception as e:
+            logger.error(f"[TavilyProvider.search] Search failed: {type(e).__name__}: {e}", exc_info=True)
+            raise
 
 
 class OpenClawWebSearchProvider(SearchProvider):
@@ -107,7 +124,9 @@ class OpenClawWebSearchProvider(SearchProvider):
         self._gateway_http_base, self._token = self._load_gateway_config(config_path=config_path)
 
     def is_available(self) -> bool:
-        return bool(self._gateway_http_base and self._token)
+        available = bool(self._gateway_http_base and self._token)
+        logger.debug(f"[OpenClawWebSearchProvider.is_available] {available} (gateway={bool(self._gateway_http_base)}, token={bool(self._token)})")
+        return available
 
     @staticmethod
     def _load_gateway_config(*, config_path: Optional[str] = None) -> tuple[str, str]:
@@ -153,6 +172,7 @@ class OpenClawWebSearchProvider(SearchProvider):
         import requests
 
         url = f"{self._gateway_http_base}/tools/invoke"
+        logger.debug(f"[OpenClawWebSearchProvider._invoke_tool] Invoking {tool} on {url} with args: {args}")
         headers = {
             "Authorization": f"Bearer {self._token}",
             "Content-Type": "application/json",
@@ -162,58 +182,77 @@ class OpenClawWebSearchProvider(SearchProvider):
             "args": args,
             "sessionKey": self.session_key,
         }
-        r = requests.post(url, headers=headers, json=payload, timeout=25)
-        r.raise_for_status()
-        obj = r.json()
-        if not obj.get("ok", False):
-            err = obj.get("error") or {}
-            raise RuntimeError(f"OpenClaw tool invoke failed: {err.get('type')}: {err.get('message')}")
-        result = obj.get("result") or {}
-        # Some tools (including web_search) return a chat-friendly wrapper:
-        # { content: [{type:'text', text:'{...json...}'}], details: {...} }
-        if isinstance(result, dict) and isinstance(result.get("details"), dict):
-            return result["details"]
-        # Best-effort parse from content[0].text
         try:
-            content = result.get("content") if isinstance(result, dict) else None
-            if isinstance(content, list) and content and isinstance(content[0], dict):
-                text = content[0].get("text")
-                if isinstance(text, str) and text.strip().startswith("{"):
-                    return json.loads(text)
-        except Exception:
-            pass
-        return result
+            r = requests.post(url, headers=headers, json=payload, timeout=25)
+            r.raise_for_status()
+            obj = r.json()
+            if not obj.get("ok", False):
+                err = obj.get("error") or {}
+                error_msg = f"OpenClaw tool invoke failed: {err.get('type')}: {err.get('message')}"
+                logger.error(f"[OpenClawWebSearchProvider._invoke_tool] {error_msg}")
+                raise RuntimeError(error_msg)
+            result = obj.get("result") or {}
+            logger.debug(f"[OpenClawWebSearchProvider._invoke_tool] Raw result: {str(result)[:200]}")
+            # Some tools (including web_search) return a chat-friendly wrapper:
+            # { content: [{type:'text', text:'{...json...}'}], details: {...} }
+            if isinstance(result, dict) and isinstance(result.get("details"), dict):
+                logger.debug(f"[OpenClawWebSearchProvider._invoke_tool] Using details field")
+                return result["details"]
+            # Best-effort parse from content[0].text
+            try:
+                content = result.get("content") if isinstance(result, dict) else None
+                if isinstance(content, list) and content and isinstance(content[0], dict):
+                    text = content[0].get("text")
+                    if isinstance(text, str) and text.strip().startswith("{"):
+                        logger.debug(f"[OpenClawWebSearchProvider._invoke_tool] Parsing JSON from content")
+                        return json.loads(text)
+            except Exception as e:
+                logger.debug(f"[OpenClawWebSearchProvider._invoke_tool] Failed to parse content: {e}")
+                pass
+            return result
+        except Exception as e:
+            logger.error(f"[OpenClawWebSearchProvider._invoke_tool] Request failed: {type(e).__name__}: {e}", exc_info=True)
+            raise
 
     def search(self, query: str, *, max_results: int = 5, topic: str = "news", depth: str = "basic") -> List[SearchResult]:
         # topic/depth kept for API compatibility; OpenClaw web_search doesn't expose them.
-        res = self._invoke_tool(
-            "web_search",
-            {
-                "query": query,
-                "count": max(1, min(int(max_results), 10)),
-                "country": "ALL",
-            },
-        )
-        items = res.get("results") or []
-        out: List[SearchResult] = []
-        for entry in items:
-            title = (entry.get("title") or "").strip()
-            url = (entry.get("url") or "").strip()
-            snippet = (entry.get("description") or entry.get("snippet") or "").strip()
-            published = (entry.get("published") or entry.get("age") or None)
-            if not title or not url:
-                continue
-            out.append(
-                SearchResult(
-                    title=title,
-                    url=url,
-                    snippet=snippet,
-                    provider="openclaw:web_search",
-                    published=published,
-                    score=None,
-                )
+        logger.info(f"[OpenClawWebSearchProvider.search] query={query[:60]}, max_results={max_results}")
+        try:
+            res = self._invoke_tool(
+                "web_search",
+                {
+                    "query": query,
+                    "count": max(1, min(int(max_results), 10)),
+                    "country": "ALL",
+                },
             )
-        return out
+            logger.debug(f"[OpenClawWebSearchProvider.search] Tool result: {json.dumps(res, ensure_ascii=False)[:200]}")
+            items = res.get("results") or []
+            logger.info(f"[OpenClawWebSearchProvider.search] Got {len(items)} raw items from web_search")
+            out: List[SearchResult] = []
+            for entry in items:
+                title = (entry.get("title") or "").strip()
+                url = (entry.get("url") or "").strip()
+                snippet = (entry.get("description") or entry.get("snippet") or "").strip()
+                published = (entry.get("published") or entry.get("age") or None)
+                if not title or not url:
+                    logger.debug(f"[OpenClawWebSearchProvider.search] Skipping item without title/url")
+                    continue
+                out.append(
+                    SearchResult(
+                        title=title,
+                        url=url,
+                        snippet=snippet,
+                        provider="openclaw:web_search",
+                        published=published,
+                        score=None,
+                    )
+                )
+            logger.info(f"[OpenClawWebSearchProvider.search] Returning {len(out)} valid SearchResult objects")
+            return out
+        except Exception as e:
+            logger.error(f"[OpenClawWebSearchProvider.search] Search failed: {type(e).__name__}: {e}", exc_info=True)
+            raise
 
 
 class SearchManager:
@@ -278,33 +317,41 @@ class SearchManager:
         """
 
         start = time.time()
+        logger.info(f"[SearchManager.search] Starting search with {len(self.providers)} provider(s), query: {query[:80]}")
 
         union_key = self._cache_key(query, "union", max_results, topic, depth)
         cached_union = self._read_cache(union_key)
         if cached_union is not None:
+            logger.info(f"[SearchManager.search] Cache hit (union), returning {len(cached_union)} results")
             return cached_union
 
         merged: List[SearchResult] = []
         seen_urls = set()
 
         for provider in self.providers:
-            if (time.time() - start) > self.hard_timeout_seconds:
+            elapsed = time.time() - start
+            if elapsed > self.hard_timeout_seconds:
+                logger.warning(f"[SearchManager.search] Hard timeout ({elapsed:.1f}s > {self.hard_timeout_seconds}s), stopping")
                 break
             if not provider.is_available():
+                logger.debug(f"[SearchManager.search] Provider {provider.name} not available")
                 continue
 
+            logger.debug(f"[SearchManager.search] Querying provider: {provider.name}")
             ck = self._cache_key(query, provider.name, max_results, topic, depth)
             cached = self._read_cache(ck)
             res: List[SearchResult]
             if cached is not None:
+                logger.debug(f"[SearchManager.search] Cache hit ({provider.name}), {len(cached)} results")
                 res = cached
             else:
                 try:
                     res = provider.search(query, max_results=max_results, topic=topic, depth=depth)
+                    logger.info(f"[SearchManager.search] Provider {provider.name} returned {len(res)} results (raw)")
                     if res:
                         self._write_cache(ck, res)
                 except Exception as exc:
-                    logger.warning("Search provider %s failed for query %r: %s", provider.name, query, exc)
+                    logger.error(f"[SearchManager.search] Provider {provider.name} failed: {type(exc).__name__}: {exc}")
                     continue
 
             for r in res:
@@ -315,9 +362,11 @@ class SearchManager:
                 merged.append(r)
                 if len(merged) >= max_results:
                     break
+            logger.debug(f"[SearchManager.search] After {provider.name}: merged={len(merged)} results")
             if len(merged) >= max_results:
                 break
 
+        logger.info(f"[SearchManager.search] Final result: {len(merged)} merged results from {len(self.providers)} provider(s)")
         self._write_cache(union_key, merged)
         return merged
 
